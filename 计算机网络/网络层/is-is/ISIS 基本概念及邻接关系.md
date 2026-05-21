@@ -357,7 +357,7 @@ ISIS HELLO
 
 发送该 Hello 报文的路由器实际上是在告知邻居：当你收到这份 Hello 报文后，如果在指定的 Holding Timer 时间内没有再收到我后续发送的 Hello 报文，就可以认为我已经不可达，并将与我的邻接关系置为 Down。
 
-根据 RFC 1142 原文，The IS shall keep a holding time (adjacency holding Timer) for the point-to-point adjacency. The value of the holding Timer shall be set to the Holding Time as reported in the Holding Timer field of the Pt-Pt IIH PDU. **<font color="red">If a neighbour is not heard from in that time, the IS shall purge it from the database; and generate an adjacencyStateChange (Down) notification</font>**.
+根据 RFC 1142 原文，The IS shall keep a holding time (adjacency holding Timer) for the point-to-point adjacency. The value of the holding Timer shall be set to the Holding Time as reported in the Holding Timer field of the Pt-Pt IIH PDU. **_<font color="red">If a neighbour is not heard from in that time, the IS shall purge it from the database; and generate an adjacencyStateChange (Down) notification</font>_**.
 
 - PDU Length（报文长度）：表示整个 IS-IS 报文的长度。
 - Priotity（优先级）：表示发送端接口的优先级，用来在 LAN 中选举 DIS，默认值=64。
@@ -448,3 +448,211 @@ Point-to-Point Adjacency State
 R1 收到该报文后，会首先检查其中的 **`Neighbor SystemID`** 是否与自身的 System-ID 一致；确认一致后，再进一步检查 **`Neighbor Extended Local Circuit ID`** 是否与 R1 本地链路的 **`Extended Local Circuit ID`** 相同。由于两者的值均为 **`0x00000002`**，因此 R1 可以明确判断：R3 确实是在与本设备的该接口建立邻接关系。
 
 不管在哪一种网络中，Hello 报文都是周期性发送的，用于维持邻接关系。如果等待时间到达时还没收到邻居的 Hello，就宣告邻接关系失效。默认发送 Hello 的时间间隔为 10s，邻接关系的超时时间（Hold-timer）是 Hello 间隔的 3 倍。但是在广播链路上，DIS 发送 Hello 的频率是普通路由器的 1/3 倍（每 3.3333 秒发送一次 Hello）。接口下可以修改 Hello 间隔时间及超时时间。
+
+### 4.2 邻接关系的建立
+
+IS-IS 协议作为一种链路状态路由协议，每台路由器都会生成 LSP，然后将其泛洪到网络中，所有路由器都会将 LSP（本地和其他路由器通告的）存放至 LSDB，再基于 LSDB 利用 SPF 算法计算出最优路由。**<font color="red">泛洪 LSP 之前需要跟相邻路由器形成邻接关系。只有邻接关系形成后，LSP 才能在相邻路由器之间互相交换</font>**，进而更新自己的 LSDB。
+
+对于 L1 和 L2 的路由器，IS-IS 协议可以形成不同层次的邻接关系，这里只需要注意，一台 L1 路由器是不能和 L2 路由器建立邻接关系的。影响两台 IS-IS 路由器建立邻接关系的因素有两方面。
+
+一方面是从路由器层次和区域 ID 上考虑，要建立邻接关系必须满足以下条件：
+
+- 两台 L1 路由器必须在同一区域才能建立邻接关系。
+- **两台 L2 路由器建立 L2 邻接关系不要求在同一区域**。
+- **一台 L1 路由器和一台 L1/2 路由器在相同区域时才能形成 L1 邻接关系**。
+- 一台 L2 路由器和一台 L1/2 路由器不管是同区域还是不同区域，都能形成 L2 邻接关系。
+- 两台 L1/2 路由器，同区域内可形成 L1 和 L2 邻接关系，不同区域只能形成 L2 邻接关系。
+
+从其他因素考虑，有以下条件需要满足：
+
+- 链路两端的 IS-IS 接口的网络类型必须一样，必须都是 LAN/Broadcast 或者 P2P 类型。
+- 华为还要求链路两端的 IP 地址位于同一个子网。
+- IS-IS 要求整个域内路由器使用的 System-Id 长度必须一致，**<font color="red">在华为的实现中，System-Id 长度固定使用 6Byte</font>**。该规则则用于 P2P 邻接。
+- 两台路由器使用的最大区域地址数要相同，华为默认支持最大区域地址数是 3。该规则则用于 P2P 邻接。
+- 如果配置了认证，要求两台路由器的认证信息要一致（认证类型和密钥信息）。
+- 要求链路两端的接口 MTU 值要一致；在华为的实现中，不管是 P2P 链路还是广播链路，发送的 Hello 都是填充至接口 MTU 大小，用以检查链路两端的接口 MTU。
+
+#### 4.2.1 广播网络的邻接关系建立
+
+在广播网络中，IS-IS 使用 LAN IIH 来建立邻接关系，L1 的 LAN IIH 发送到组播地址：**`01-80-c2-00-00-14`**，L2 的 LAN IIH 发送到组播地址：**`01-80-c2-00-00-15`**。当路由器发送 Hello 报文时，它会根据接口的层级决定发送出的是 L1 的 Hello 还是 L2 的 Hello。接口的层级可以在接口下配置，跟全局的层级是没关系的，接口默认的层级是 L1/2。
+
+当路由器收到 Hello 报文后，检查跟发送 Hello 报文的路由器的邻接情况，**如果已经建立好邻接关系，则在邻居表中重置和此邻居关联的保持定时器（根据发送过来的 Hello 报文中的 Holding Timer）**；如果邻接关系没有建立，则通过发送过来的 Hello 报文中的参数决定是否建立新的邻接关系。下图就是在广播链路上邻接关系的建立过程。
+
+<div align="center">
+    <img src="isis_static/9.png" width="450"/>
+</div>
+
+具体过程如下所示：
+
+- 第 1 步：R1 的接口启动 IS-IS 进程后，发出 L2 LAN IIH，报文中携带了自己的 System-Id，IS Neighbor 列表中没有任何邻居标识。
+- 第 2 步：R2 接收到 Hello 报文后，将自己和 R1 的邻接状态设置为初始化状态，然后向 R1 回复自己的 Hello 报文，报文中携带了自己的 System-ID，**同时在 IS Neighbor 列表中携带了 R1 MAC 地址**。
+- 第 3 步： R1 接收到 R2 的 Hello 报文后，**<font color="red">由于在这份 Hello 报文的邻居列表中看到了自己的 MAC 地址，R1 将 R2 的邻接关系状态设置为 UP</font>**。然后在向 R2 发送的 Hello 报文中，也会将 R2 的 MAC 地址放到 IS Neighbor 邻居列表中。
+- 第 4 步：同第 3 步，R2 接收到 Hello 报文后，也将自己与 R1 的邻接关系状态设置为 UP。至此，两台路由器的邻接关系建立完成。
+
+为保证邻接关系建立的可靠性，广播网络中的 Hello 中使用了 IS Neighbor 这个 TLV（类型 6），路由器如果在接收到的 Hello 报文中看到了自己的 MAC 地址，那么就宣告邻接关系建立起来了，这也叫三次握手机制。因为是广播网络，所以还得选举 DIS。在邻接关系建立后，路由器再等待 2 个 Hello 报文的时间，才开始选举 DIS。下面的输出内容显示了在广播网络中一台 IS-IS 路由器 AR8 的邻居表。
+
+```java{.line-numbers}
+<AR8>display isis peer 
+                          Peer information for ISIS(1)
+  System Id     Interface          Circuit Id       State HoldTime Type     PRI
+-------------------------------------------------------------------------------
+0000.0000.0006  GE0/0/0            0000.0000.0006.01 Up   8s       L2       64 
+0000.0000.0005  GE0/0/0            0000.0000.0006.01 Up   26s      L2       64 
+Total Peer(s): 2
+```
+
+表中第一列显示了邻居路由器的 System-ID。第二列表示本地到邻居路由器的接口（本路由器的接口）。第三列标识了邻居路由器的电路 ID，电路 ID 用于唯一标识一个 IS-IS 接口，如果该接口是和一个广播网络相连的，那么这个电路 ID 是该广播网络上的 DIS 设置的，**`0000.0000.0006`** 是 DIS 的 System-ID，01 表示伪节点 ID，这时电路 ID 也称作 LAN ID。这说明这个广播网段的 DIS 是 System-ID 为 **`0000.0000.0006`** 的路由器，也就是 AR6。**`.01`** 是 AR6 为该广播 LAN 创建的非 0 伪节点 ID。
+
+第四列表示邻接关系状态，正常状态为 UP。第五列表示对邻居的保持时间，如果该邻居是 DIS，那么保持时间为 10 秒。第六列表示邻接类型。最后一列表示邻居接口的 DIS 优先级。
+
+为什么要引入伪节点，在 IS-IS 广播网络中，如果没有伪节点机制，LSDB 在描述该 LAN 拓扑时，就需要把同一广播网段上的各台路由器之间的连接关系逐一描述出来。假设一个 LAN 上有 n 台 IS-IS 路由器，那么每台路由器都可能需要在自己的 LSP 中声明它与其他 n-1 台路由器之间的连接关系。这样一来，随着路由器数量增加，LSDB 中的链路描述数量会按近似平方级增长。
+
+根据 RFC 1159，Special treatment is necessary for broadcast subnetworks, such as LANs. This solves two sets of issues: (i) In the absence of special treatment, each router on the subnetwork would announce a link to every other router on the subnetwork, resulting in n-squared links reported; (ii) Again, in the absence of special treatment, each router on the LAN would report the same identical list of end systems on the LAN, resulting in substantial duplication.
+
+These problems are avoided by use of a "pseudonode", which represents the LAN. Each router on the LAN reports that it has a link to the pseudonode (rather than reporting a link to every other router on the LAN). One of the routers on the LAN is elected "designated router". The designated router then sends out an LSP on behalf of the pseudonode, reporting links to all of the routers on the LAN. This reduces the potential n-squared links to n links. In addition, only the pseudonode LSP includes the list of end systems on the LAN, thereby eliminating the potential duplication.
+
+因此，引入伪节点后，IS-IS 不再把该 LAN 上的每两台路由器都建模成一条独立链路，而是把整个广播网段抽象成一个虚拟节点，也就是 Pseudonode。**<font color="red">每台接入该 LAN 的 IS-IS 路由器，只需要在自己的 LSP 中声明我连接到了这个伪节点；同时，由 DIS 代表这个伪节点生成一份伪节点 LSP，在其中声明这个伪节点连接了哪些路由器</font>**。
+
+AR5 上的 level-2 lsdb 如下所示，可以看出 AR5，AR6，AR8 都连接到了同一个广播 LAN 伪节点 **`0000.0000.0006.01`**，而伪节点 **`0000.0000.0006.01`** 连接了 **`AR6 0000.0000.0006.00`**、**`AR8 0000.0000.0008.00`**、**`AR5 0000.0000.0005.00`** 这 3 台路由器。
+
+```java{.line-numbers}
+<AR5>display isis lsdb level-2 verbose 
+                        Database information for ISIS(1)
+                        --------------------------------
+                          Level-2 Link State Database
+LSPID                 Seq Num      Checksum      Holdtime      Length  ATT/P/OL
+-------------------------------------------------------------------------------
+0000.0000.0005.00-00* 0x0000000b   0x6140        631           140     0/0/0   
+ SOURCE       0000.0000.0005.00
+ NLPID        IPV4
+ NBR  ID      0000.0000.0006.00  COST: 30        
+ NBR  ID      0000.0000.0001.00  COST: 10                       
+ NBR  ID      0000.0000.0006.01  COST: 10             // 连接到伪节点
+
+0000.0000.0006.00-00  0x0000000d   0x582a        611           140     0/0/0   
+ SOURCE       0000.0000.0006.00
+ NBR  ID      0000.0000.0002.00  COST: 10        
+ NBR  ID      0000.0000.0005.00  COST: 30        
+ NBR  ID      0000.0000.0006.01  COST: 10             // 连接到伪节点  
+
+0000.0000.0006.01-00  0x00000006   0xb92b        610           66      0/0/0   
+ SOURCE       0000.0000.0006.01
+ NLPID        IPV4
+ NBR  ID      0000.0000.0006.00  COST: 0         // 伪节点
+ NBR  ID      0000.0000.0008.00  COST: 0         
+ NBR  ID      0000.0000.0005.00  COST: 0         
+
+0000.0000.0008.00-00  0x00000008   0xac01        526           70      0/0/0   
+ SOURCE       0000.0000.0008.00
+ NLPID        IPV4
+ AREA ADDR    49.0002 
+ INTF ADDR    10.1.158.8
+ NBR  ID      0000.0000.0006.01  COST: 10            // 连接到伪节点
+ IP-Internal  10.1.158.0      255.255.255.0    COST: 10        
+
+Total LSP(s): 6
+    *(In TLV)-Leaking Route, *(By LSPID)-Self LSP, +-Self LSP(Extended), ATT-Attached, P-Partition, OL-Overload
+```
+
+#### 4.2.2 P2P 网络邻接关系的建立
+
+由于当初在设计 IS-IS 的时候，根据 ISO10589 的定义，点对点 Hello 报文不包括 IS Neighbor TLV（类型 6），因此，在 P2P 网络中无法像广播网络那样使用三次握手机制来建立邻接关系，而只能使用两次握手机制。直到在后来的集成 IS-IS 协议中才支持通过三次握手机制建立邻接关系。
+
+P2P 网络中两次握手建立邻接关系的过程如下所示：
+
+<div align="center">
+    <img src="isis_static/10.png" width="450"/>
+</div>
+
+它们之间建立邻接关系的过程如下。
+
+- RouterA 接口启动 IS-IS 后，首先向 RouterB 发送一份 P2P IIH，报文中携带了自己的 System-Id 和其他信息，但报文并没有 IS Neighbor 邻居列表。
+- RouterB 接收到 Hello 报文后，直接将 RouterA 的邻接状态设置为 UP。
+- 同第 2 步，RouterA 也在收到 RouterB 的 Hello 报文后将邻接状态直接设置为 UP。
+
+两次握手机制当单向链路故障时，可能出现邻接状态判断不一致。为支持在 P2P 网络中使用三次握手机制建立邻接关系，集成 IS-IS 协议的 Hello 报文增加了一个新字段，叫 P2P 邻接状态（也就是类型 240 的 TLV），使用该 TLV 携带邻居的信息。上述拓扑 AR1 的类型 240 的 TLV 包含的内容：
+
+```java{.line-numbers}
+Point-to-point Adjacency State (t=240, l=15)
+    Type: 240
+    Length: 15
+    Adjacency State: Up (0)
+    Extended Local circuit ID: 0x00000001
+    Neighbor SystemID: 0000.0000.0001
+    Neighbor Extended Local circuit ID: 0x00000001
+```
+
+从上面可以看出：
+
+- 类型：0xF0；
+- 长度：5~17Byte；
+- 值：1Byte，表示邻接状态，一共有 3 种状态，**`UP（=0）`**，**`Initializing（=1）`**，**`Down（=2）`**；
+- 扩展的本地电路 ID：4Byte，本端对点对点网络接口的标识；
+- 邻居 System-ID：邻居系统 ID；
+- 邻居扩展的本地电路 ID：0 或 4Byte，邻居端对点对点网络接口的标识。
+
+有了类型 240 的 TLV 后，**<font color="red">路由器在接收到的 Hello 报文中，通过确认 Neighbor SystemID 字段是否包含自己的 System-ID，从而实现三次握手机制</font>**。同时，本地的邻接状态基于当前状态和收到的类型 240 TLV 中显示的邻接状态值进行设置。
+
+下面显示了 P2P 网络建立邻居的详细过程：
+
+<div align="center">
+    <img src="isis_static/11.png" width="550"/>
+</div>
+
+- RouterA 接口启动 IS-IS 后，首先发出邻接状态为 Down 的 P2P IIH。
+- RouterB 接收到 Hello 后，根据里面邻接状态字段将 RouterA 邻接状态设置为 Initializing，并在回复给 RouterA 的 Hello 报文中将邻接状态字段设置成 Initializing。
+- RouterA 从 RouterB 接收到的邻接状态为 Initializing，并且 Neighbor SystemID 中包含了自己，立刻将 RouterB 的邻接状态设置为 UP 状态；并且在发给 RouterB 的下一 Hello 报文中，将邻接状态字段设置为 UP。
+- RouterB 接收到 RouterA 的邻接状态为 UP 的 Hello 报文后，立刻将 RouterA 的邻接状态设置为 UP。至此，RouterA 和 RouterB 的邻接关系建立完成。
+
+### 4.3 DIS
+
+**<font color="red">IS-IS 路由器通过 Hello 报文建立邻接关系。两台路由器建立完邻接关系之后，就开始交换链路状态的状态信息（也就是 LSDB 的同步），交换过程是通过泛洪 LSP 来实现的</font>**。为保障 LSP 泛洪的准确性和及时性，要求在拓扑发生变化时，立即泛洪新的 LSP，在网络稳定时也要周期性泛洪 LSP，这就提高了带宽和处理资源开销。
+
+在广播型多路访问网络中，IS-IS 协议需要在所有路由器之间建立邻接关系，IS-IS 协议将整个多路访问网络本身看作一台路由器或一个伪节点，如下所示。有了 DIS 后，多路访问网络中的邻居间泛洪 LSP 后，通过 DIS 的 SNP（序列号报文）来确保 LSP 泛洪的可靠。
+
+<div align="center">
+    <img src="isis_static/12.png" width="450"/>
+</div>
+
+在广播网络中，必须有一台路由器被推举为 DIS，而 IS-IS 协议选举 DIS 的过程非常简单。在 IS-IS 路由器的接口有 L1 和 L2 两个层级，每一层都有一个优先级——L1 优先级和 L2 优先级，**网络中需要为 L1 和 L2 分别选举对应的 DIS，L1 和 L2 这两种邻接关系下的 LSDB 同步（泛洪 LSP）过程是相互独立的，所以必须要有相应层级的 DIS**。选举过程如下所示：
+
+- 选举基于接口优先级，优先级最高的当选 DIS。
+- 如果所有接口的优先级一样，具有最大的 Subnetwork Point of Attachment（SNPA）的路由器将当选 DIS，在 LAN 中，SNPA 指的是 MAC 地址；
+- 如果 SNPA 是一样的，具有最大的 System-ID 的路由器将当选 DIS。
+
+华为路由器接口的优先级的范围是 **`0~127`**，默认的接口的优先级是 64。与 OSPF 选举 DR 过程不同的是，优先级为 0 的 IS-IS 接口也可以参与选举 DIS，在 OSPF 中就不行。另外，不论是 L1 还是 L2，DIS 在 LSP 泛洪过程中都很重要，但是都没有选举备份 DIS。
+
+对于 IS-IS 协议来说，**<font color="red">如果一台优先级高或 Mac 地址高的路由器加入到现有网络中，那么这台新路由器会抢占现有 DIS 而成为新的 DIS</font>**，这一点也与 OSPF 的 DR 不同。在 OSPF 中，DR 和 BDR 都是不允许被抢占的。
+
+```java{.line-numbers}
+<AR6>display isis  interface 
+                       Interface information for ISIS(1)
+ Interface       Id      IPV4.State          IPV6.State      MTU  Type  DIS   
+ GE0/0/0         001         Up                 Down         1497 L2    -- 
+ GE0/0/1         002         Up                 Down         1497 L2    -- 
+ GE0/0/2         001         Up                 Down         1497 L2    Yes
+ Loop0           003         Up                 Down         1500 L1/L2 -- 
+<AR5>display isis interface 
+                       Interface information for ISIS(1)
+ Interface       Id      IPV4.State          IPV6.State      MTU  Type  DIS   
+ GE0/0/0         001         Up                 Down         1497 L2    -- 
+ GE0/0/1         002         Up                 Down         1497 L2    -- 
+ GE0/0/2         001         Up                 Down         1497 L2    No 
+ Loop0           003         Up                 Down         1500 L1/L2 -- 
+```
+
+上面的输出内容显示了 2 台 IS-IS 路由器 AR5 和 AR6 的接口信息，最后一列标识该接口是否为直连广播网络中的 DIS。路由器 AR6 的 **`GE0/0/2`** 接口在 L2 上是 DIS。
+
+```java{.line-numbers}
+<AR5>display isis  peer 
+                          Peer information for ISIS(1)
+  System Id     Interface          Circuit Id       State HoldTime Type     PRI
+-------------------------------------------------------------------------------
+0000.0000.0001  GE0/0/0            0000000003        Up   22s      L2       -- 
+0000.0000.0006  GE0/0/1            0000000002        Up   20s      L2       -- 
+0000.0000.0006  GE0/0/2            0000.0000.0006.01 Up   8s       L2       64 
+0000.0000.0008  GE0/0/2            0000.0000.0006.01 Up   29s      L2       64 
+Total Peer(s): 4
+```
+
+由上面的输出内容可看到，AR5 与 AR1 通过 **`GE0/0/0`** 口建立了 P2P 邻接关系，与 AR6 通过 **`GE0/0/1`** 口建立了 P2P 邻接关系，与 AR6 和 AR8 通过 **`GE0/0/2`** 口建立了广播网络的邻接关系。第 3 列标识了该网络中伪节点的电路 ID，也叫 LAN ID。其中 **`0000.0000.0006`** 是该广播网段 L2 DIS，也就是 AR6 的 System-ID；**`.01`** 是 AR6 为这个 LAN 分配的非 0 伪节点编号。
