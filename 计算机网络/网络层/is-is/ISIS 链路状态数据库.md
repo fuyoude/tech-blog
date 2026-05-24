@@ -445,20 +445,20 @@ flowchart TD
     C -- N --> D[丢弃]
     C -- Y --> E[按 LSP ID 在对应 Level 的 LSDB 中<br/>查找本地副本]
 
-    E --> F{比较 received LSP<br/>vs. local LSP}
+    E --> F{比较 received LSP<br/>vs. local LSP 哪一个更新}
 
     F -- 对方更新 --> G[入库（更新LSDB）]
-    G --> H[确认 PSNP 并泛洪]
+    G --> H["确认 PSNP 并泛洪(P2P 链路)<br/>无需确认(广播链路)"]
     H --> I[触发 SPF]
     I --> Z([结束])
 
     F -- 本地更新 --> J[回送本地更新版本]
     J --> Z
 
-    F -- 两者相同 --> K[确认 PSNP]
+    F -- 两者相同 --> K["确认 PSNP 并泛洪(P2P 链路)<br/>无需确认(广播链路)"]
     K --> Z
 
-    F -- "Remaining Lifetime = 0<br/>(purge LSP)" --> L[按 purge 处理<br/>]
+    F -- "Remaining Lifetime = 0<br/>(purge LSP)" --> L[按 purge 处理<br/>删除该 LSP]
     L --> M[触发 SPF]
     M --> Z
 
@@ -481,57 +481,105 @@ flowchart TD
     class Z finish
 ```
 
-1. 先做合法性和接收条件检查
-收到 LSP 后，设备不会马上入 LSDB。它要先判断这个 LSP 是否是自己应当接收的报文，例如：
-1）. PDU 头部、长度、语法是否正确
-2）. LSP checksum 是否正确
-3）. LSP 是 Level-1 还是 Level-2
-4）. 本接口/本设备是否允许这个 level
-5）. 如果配置认证，认证是否通过
-6）. 是否命中丢弃指定 LSP 等安全策略
-1. 找到对应 LSDB 项，比较谁更新
-LSP 不是只按“有没有收到”处理，而是按 LSP ID + Sequence Number + Remaining Lifetime + Checksum 判断版本。
-LSP 头部里关键字段包括：
-1）LSP ID
-2）Sequence Number
-3）Remaining Lifetime
-4）Checksum
-5）Level-1 / Level-2 类型
-RFC 1195 说明，IS-IS 报文主要分为 Hello、LSP 和 SNP 三类；LSP 用于交换链路状态信息，并分为 Level-1 LSP 和 Level-2 LSP。RFC 1195 还说明 SNP 条目中包含 Remaining Lifetime、LSP ID、LSP Sequence Number 和 Checksum，这些字段正是 LSDB 同步和比较 LSP 新旧的依据。
-同一个 LSP ID 下比较新旧：
+在上述流程图中，按 LSP ID 在对应 level 的 LSDB 中查找对应 LSP 副本， 并且比较谁更新，比较流程如下所示：
+
 1. Sequence Number 大的更新。
 2. Sequence Number 相同：
-   - 如果收到的 LSP Remaining Lifetime = 0，而本地对应 LSP 不为 0，
-     收到的 LSP 是更新的 purge LSP。
-   - 如果收到的 LSP Remaining Lifetime ≠ 0，而本地对应 LSP = 0，
-     本地 purge LSP 更新，应回发本地 LSP。
-3. 如果双方 Remaining Lifetime 都不为 0：
-   - 华为很多文档描述为比较 Checksum，Checksum 大的更新（tie-breaker）。
-4. 如果 Sequence Number、Remaining Lifetime、Checksum 都相同：
-   - 不再转发该 LSP；在 P2P 场景下仍可能涉及 PSNP 确认逻辑。
-5. 如果收到的 LSP 比本地更新
-这是最常见的“正常更新”场景。
-收到的 LSP 更新
-  ↓
-替换/加入本地 LSDB
-  ↓
-在除入接口外的其他相关接口上标记待泛洪
-  ↓
-P2P 链路上发送 PSNP 确认
-  ↓
-如果 LSP 内容变化，触发 SPF / PRC / 路由计算
-华为资料中明确写到：处理从邻居收到的新 LSP 时，路由器会把 LSP 安装到 LSDB，并标记为待泛洪。如果收到 LSP 的序列号大于本地 LSDB 中对应 LSP 的序列号，设备把收到的 LSP 加入 LSDB，发送 PSNP 确认，并把该 LSP 发给除发送者之外的其他邻居。
-1. 如果收到的 LSP 比本地旧
-这种情况下，设备不会用旧 LSP 覆盖自己的 LSDB。
-收到的 LSP 较旧
-  ↓
-丢弃/不入库
-  ↓
-把本地更新版本的 LSP 从收到该旧 LSP 的接口发回去
-  ↓
-让对端更新 LSDB
-华为资料也有类似描述：如果收到的 LSP 序列号小于本地 LSDB 中对应 LSP 的序列号，路由器会直接把本地 LSP 发给邻居。标准里对应的是：如果收到的 LSP 比数据库里的旧，就在收到旧 LSP 的电路上设置 SRM 标志，表示要把本地保存的更新 LSP 发回去。
-1. 如果收到的 LSP 与本地相同
-如果收到的是重复 LSP，原则上不再继续泛洪，否则会造成无意义的重复扩散。
-6.如果 Remaining Lifetime = 0
-Remaining Lifetime = 0 表示这是一个 purge LSP，也就是用来清除某个 LSP 的报文。
+   - 如果收到的 **`LSP Remaining Lifetime = 0`**，而本地对应 LSP 不为 0，收到的 LSP 是更新的 purge LSP；
+   - 如果收到的 **`LSP Remaining Lifetime ≠ 0`**，而本地对应 **`LSP = 0`**，本地 purge LSP 更新，应回发本地 LSP；
+3. 如果双方 Remaining Lifetime 都不为 0，根据华为文档描述为比较 Checksum，Checksum 大的更新（tie-breaker）；
+4. 如果 Sequence Number、Remaining Lifetime、Checksum 都相同，不再转发该 LSP；
+
+因此根据上述流程图以及比较报文新旧的流程，处理从邻居收到的新 LSP 时，路由器会把 LSP 安装到 LSDB，并标记为待泛洪。如果收到 LSP 的序列号大于本地 LSDB 中对应 LSP 的序列号，设备把收到的 LSP 加入 LSDB，发送 PSNP 确认，并把该 LSP 发给除发送者之外的其他邻居。如果收到的 LSP 序列号小于本地 LSDB 中对应 LSP 的序列号，路由器会直接把本地 LSP 发给邻居。如果收到的是重复 LSP，原则上不再继续泛洪，否则会造成无意义的重复扩散。
+
+### 3.2 计时器
+
+#### 3.2.1 最大生存时间
+
+最大生存时间是指一个 LSP 从产生开始直到过期经历的最长时间，ISO10589 定义的 LSP 最大生存时间为 1200s，一个 LSP 的生存时间是从最大生存时间向下递减的。正常情况下，一个 LSP 的始发源路由器会定期更新它的 LSP，路由器接收到新的 LSP 后，替换掉老的 LSP 并重置 LSP 的剩余生存时间到最大生存时间。如果 LSP 的剩余生存时间减少到 0 时，还没有得到源路由器的刷新，那么这个 LSP 就会被清除。在清除之前路由器还会等一个零阳寿生存时间（Zero Age Life Time），ISO 10589 定义的零阳寿生存时间为 60s。
+
+>网络中的路由器使用的 LSP 最大生存时间必须一致，如果路由器接收到一个 LSP 的剩余生存时间比本地的最大生存时间还要大，那么会认为该 LSP 已经被破坏而将其丢弃，从而影响网络的稳定性。
+
+#### 3.2.2 LSP 刷新间隔
+
+LSP 始发路由器在 LSP 剩余生存时间减少到 0 之前，每隔一定时间会重新产生该 LSP 的新实例，这个时间间隔默认认为 900s。周期性的刷新有利于网络中所有路由器的链路状态数据库的完整性。华为 VRP 系统修改 LSP 刷新间隔的命令是 **`timer lsp-refresh`**。
+
+#### 3.2.3 LSP 连续生成间隔
+
+为了避免 LSP 频繁生成给网络带来的冲击，**<font color="red">LSP 的生成存在一个最小间隔的限制，即同一个 LSP 在最小间隔内不允许重复生成，一般缺省最小时间间隔为 5s</font>**。在一些不稳定的网络中，可以将 LSP 生成间隔设置大些，比如网络中有条链路持续翻滚的话，由于本地路由信息发生变化，路由器需要产生新的 LSP 来通告，就会导致路由器不停地产生新的 LSP，这会让网络中其他路由器的 SPF 进程频繁进行路由计算。另一方面，如果产生 LSP 的延迟时间过长，则本地路由信息的变化无法及时通告给邻居，导致网络的收敛速度变慢。可以使用 **`timer lsp-generation`** 命令来设置产生 LSP（这些 LSP 具有相同的 LSP ID）的延迟时间。
+
+LSP 刷新间隔是即使网络没变化，始发路由器也要定期重新生成自己产生的 LSP，防止它老化到 0。LSP 连续生成时间间隔是当本地路由信息连续变化时，限制同一个 LSP ID 的新 LSP 生成频率，避免链路抖动导致设备不停生成 LSP。前者是周期性保活/刷新机制，后者是变化触发后的节流/抑制机制。
+
+#### 3.2.4 LSP 传输间隔
+
+LSP 传输间隔是指连续传送两个 LSP 的间隔，缺省情况下，接口上发送 LSP 的最小时间间隔为 50ms。如果邻居路由器的资源有限，其他路由器向其传递一个 LSP 后，它无法按时确认的话，其他路由器就会重传 LSP，这时可能使情况更加恶化，为了保护这样的邻居，LSP 传输间隔就得设置大些。
+
+>LSP 连续生成间隔控制的是本地多久重新生成自己的 LSP，也就是当本地路由信息变化后，设备创建新版本 LSP 的最小间隔。它用于避免链路或路由频繁抖动时不断生成新 LSP，从而增加 CPU 和 LSDB 泛洪压力。
+>LSP 传输间隔控制的是已生成或待泛洪的 LSP 从接口发出去的速度，也就是同一接口连续发送两个 LSP 的最小间隔。它属于出口限速，不会减少本地 LSP 的生成次数，只是放慢泛洪节奏，避免大量 LSP 瞬间压给邻居。
+
+#### 3.2.5 CSNP 发送间隔
+
+在广播网络中，为维护链路状态数据库的完整性，DIS 周期性地发送 CSNP，默认间隔是 10s。华为 VRP 系统可以通过接口命令 **`isis timer csnp`** 来修改该默认值。该值设得小些，有利于网络的快速收敛，但同时增加了带宽的开销。
+
+## 4.链路状态数据库的同步过程
+
+### 4.1 广播网络中的同步过程
+
+在广播网络中，路由器在邻接关系初始化后，首先泛洪自己的 LSP，L1 的 LSP 发送到组播地址 **`01-80-C2-00-00-14（L1 IS）`**，L2 的 LSP 发送到组播地址 **`01-80-C2-00-00-15（L2 IS）`**。其他 L1 或 L2 邻居接收 LSP 后，并不需要确认，因此在广播网络中，LSP 的泛洪是不可靠的。因此 IS-IS 协议使用 DIS 周期性地发送 CSNP 来保证广播网络中链路状态数据库的同步。
+
+DIS 是 IS-IS 协议用来在广播网络中控制数据库信息的泛洪和同步的。**<font color="red">在广播网络中，路由器都与 DIS 建立了邻接关系（当然，所有路由器之间都建立了邻接关系）</font>**，这就意味着，DIS 的数据库拥有其他所有路由器的数据库信息，基于这个前提，DIS 使用一个或多个 CSNP 描述自己整个链路状态数据库信息，然后周期性地（每隔 10 秒）扩散到网络中。
+
+其他路由器接收到 DIS 的 CSNP 后，与自己的数据库中的内容作比较，比较后会发现自己缺失或较新的 LSP，然后发送 PSNP 来请求相应的 LSP。网络中的 DIS 或具有这份 LSP 的邻居收到请求后就会回应相应的 LSP。在广播链路上，**<font color="red">发送 LSP 之前会在接口上先设置一个 SRM 标志，待发送完 LSP 后立刻清除标志</font>**。如果路由器查看 DIS 发过来的 CSNP 内容后，发现自己数据库中具有的 LSP 而 DIS 没有或 DIS 具有的更老，这时它会主动将自己的 LSP 泛洪出来。
+
+在一个广播网络中有可能存在多台路由器，在链路状态数据库的同步过程中，如果对每条接收的 LSP 都要给予确认的话，这就需要发送端路由器跟踪其他所有邻居的接收情况，从而让整个过程变得更复杂。
+
+在 IS-IS 里，SRM 标志（Send Routing Message flag），可以理解为某个 LSP 在某个接口上需要被发送/泛洪出去的待发送标记。标准 RFC 1142 对 SRM 的定义是：Send Routeing Message (SRMflag)  if set, indicates that Link State PDU should be transmitted on that circuit.  On broadcast circuits SRMflag is cleared as soon as the LSP has been transmitted, but on non-broadcast circuits SRMflag is only cleared on reception of a Link State PDU or Sequence Numbers PDU as described below. SRMflag 置位就表示该 LSP 要在这条 circuit 上发送。广播电路上 LSP 发出后清 SRM；非广播电路上，SRM 要等收到 LSP 或 SNP 后才清。
+
+IS-IS 的 LSP 泛洪并不是设备收到一个 LSP 后，就立刻从所有接口无差别转发。路由器需要判断这条 LSP 是否还需要从某个接口发出去。SRM 就是用来记录这个状态的标志位。简单理解，某个 LSP 在某个接口上的 **`SRM=1`**，就表示这条 LSP 还需要从这个接口发送出去；**`SRM=0`**，则表示不需要发送。The Update Process scans the Link State Database for Link State PDUs with SRMflags set. When one is found, provided the timestamp lastSent indicates that it was propagated no more recently than minimumLSPTransmissionInterval, the IS shall transmit it on all circuits with SRMflags set, and update lastSent.
+
+<div align="center">
+    <img src="isis_static/14.png" width="350"/>
+</div>
+
+例如对于上述拓扑来说，假设 R2 从 R1 收到一个新的 LSP，序列号为 **`Seq=100`**，并且判断该 LSP 比本地 LSDB 中保存的版本更新，那么 R2 会先把这条 LSP 写入自己的 LSDB。由于这条 LSP 是从连接 R1 的接口收到的，R2 不需要再把它从原接口发回给 R1，因此会清除该入接口上的 SRM；但 R2 还需要把这条新的 LSP 继续泛洪给其他邻居 R3 和 R4，所以会在连接 R3、R4 的接口上设置 SRM。这样设备就能精确控制 LSP 的泛洪方向，避免无意义的回发和重复扩散。
+
+如果收到的是旧版本 LSP，假设 R2 本地已经保存了 **`R1.00-00 Seq=100`**，但从 R3 收到的却是 **`R1.00-00 Seq=90`**，这说明 R3 的 LSDB 落后。此时 R2 要把自己保存的更新版本发回给 R3。因此，R2 会在收到旧 LSP 的那个接口上设置 SRM，表示需要从该接口把本地更新的 LSP 发送出去。
+
+点到点链路要求可靠泛洪，发送 LSP 后不能立即清除 SRM，必须等对端通过 PSNP 确认后再清除；若未确认，则继续保留 SRM 以便重传。广播网络则主要依靠 DIS、CSNP 和 PSNP 完成 LSDB 同步，设备发送 LSP 后通常即可清除 SRM，不需要等待每个邻居逐一确认。
+
+<div align="center">
+    <img src="isis_static/15.png" width="450"/>
+</div>
+
+上述数据库的同步过程如下。
+
+- R3 与 R1、R2 建立邻居关系之后，它将自己的 LSP（**`R3.00-00`**）发送到 L1 和 L2 的组播地址。这样 R1 和 R2 都将收到该 LSP。
+- R2（DIS）收到 R3 的 LSP 后将其加入到 LSDB 数据库中，并等待 CSNP 报文定时器超时并发送 CSNP 报文，进行该网络内的 LSDB 同步。
+- R3 收到 DIS 发来的 CSNP 报文（里面描述了 4 个 LSP），对比自己的 LSDB 数据库，发现自己的数据库没有图中 3 个 LSP，接着它会向 DIS 发送 PSNP 报文请求。
+- DIS 收到该 PSNP 报文请求后向 R3 发送对应的 LSP。
+
+### 4.2 P2P 网络中的同步过程
+
+跟广播网络不一样，IS-IS 协议在 P2P 网络中的数据库同步过程中，接收到邻居的 LSP 后是需要给予确认的（可靠方式）。因为在 P2P 链路上，每台路由器只有一个邻居，确认不会带来过多的资源开销。
+
+在 P2P 网络中，当两台路由器建立好邻接关系后，首先交换 CSNP。对于缺少或过时的 LSP，路由器会发出 PSNP 进行请求，并且在收到邻居回应过来的 LSP 后使用 PSNP 确认；如果路由器发现邻居路由器有缺失或拥有更旧的 LSP，它会主动将 LSP 发送给邻居。如果发送的 LSP 没有得到邻居的 PSNP 确认，在重传间隔时间超时后，路由器会重传先前的 LSP，直到接收到邻居的 PSNP 确认为止。**<font color="red">在 P2P 链路上接收到一个 LSP 后，接口上会设置一个 SSN 标志表示需要向该接口发送 PSNP 确认，接收到确认后 SSN 标志就会被清除</font>**；同时，如果需要将 LSP 拷贝从一个接口发送出去，也会在该接口上设置 SRM 标志，发送后标志立刻被清除。
+
+<div align="center">
+    <img src="isis_static/16.png" width="450"/>
+</div>
+
+SSN 的常见用途之一，是在点到点链路上确认已经收到 LSP。在 P2P 链路中，IS-IS 的 LSP 泛洪需要可靠确认。例如，R1 向 R2 发送 **`R1.00-00 Seq=100`**。R2 收到后发现该 LSP 比本地更新，便将其写入 LSDB。并且 R2 不需要再从入接口把它发回 R1，因此会清除入接口上的 SRM。
+
+随后，R2 会在该入接口上设置 SSN。SSN 的作用是让这条 LSP 的摘要信息进入下一次发送的 PSNP 中。这样，R2 后续发送 PSNP 时，会携带 **`R1.00-00 Seq=100`**，R1 收到后就知道 R2 已经成功接收了这条 LSP。RFC 1142 对这个过程的描述是：如果收到的 LSP 比本地更新，或本地没有该 LSP，则将其存入数据库；对除入接口以外的其他 circuit 设置 SRM；对入接口清除 SRM；如果入接口是 **`non-broadcast circuit`**，则在该接口上为此 LSP 设置 SSN。
+
+同步过程如下：
+
+- R2 接收到 R1 的 CSNP（描述了一条 **`LSP：R1.00-00`**）后，发送 PSNP 进行请求；
+- R1 收到请求后，将相应的 LSP 拷贝发送到网络中；
+- R2 接收到请求的 LSP 后，将其拷贝存入数据库中，**并且在接口 2 设置 SSN 标志，在接口 3 设置 SRM 标志**；
+- R2 向 R3 转发这个 LSP 的拷贝并向 R1 发送 PSNP 进行确认；
+- R2 清除接口上的 SSN 标志；
+- R3 从 R2 接收到这个 LSP 后，存入数据库中，并同时在接口 4 上设置 SSN 标志；
+- R4 向 R2 发送 PSNP 确认，并同时清除接口 4 上的 SSN 标志；
+- R2 接收到 R3 的 PSNP 确认后，清除接口 3 的 SRM 标志。
+
