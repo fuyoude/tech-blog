@@ -290,8 +290,74 @@ IPV4 Destination     IntCost    ExtCost ExitInterface   NextHop         Flags
 为避免上述问题，华为设备提供了以下三种方法：
 
 - 在路由聚合命令之后配置 avoid-feedback，避免从其他设备接收到该聚合路由，**`summary 1.1.0.0 255.255.0.0 level-1 avoid-feedback`**；
-- 在路由聚合命令之后配置 generate_null0_route，在本地路由表中生成一条指向 null0 的聚合路由条目，**`summary 1.1.0.0 255.255.0.0 level-1 generate_null0_route`**；
+- 在路由聚合命令之后配置 **`generate_null0_route`**，在本地路由表中生成一条指向 null0 的聚合路由条目，**`summary 1.1.0.0 255.255.0.0 level-1 generate_null0_route`**。**`generate_null0_route`** 不影响真实明细路由的转发，但会把聚合范围内没有明细的流量丢到 Null0，防止这些流量被默认路由或其他宽泛路由带着绕圈。
 - 手工配置一条指向 null0 接口的聚合路由，**`ip route-static 1.1.0.0 255.255.0.0 null0 preference 5`**；
+
+这里我们通过配置 NULL0 的方式来解决聚合路由导致的环路问题，在 AR1 和 AR2 上配置 **`summary 10.1.4.0 255.255.252.0 level-1 generate_null0_route`** 命令，但是 AR1 和 AR2 上 **`10.1.4.0/22`** 的下一跳还是 **`G0/0/1`**。
+
+```java{.line-numbers}
+[AR1-isis-1]display ip routing-table 10.1.4.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public
+         Destinations : 27       Routes : 28       
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.4.0/22  ISIS-L1 15   40          D   10.1.12.2       GigabitEthernet0/0/1
+[AR2-isis-1]display ip routing-table 10.1.4.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public
+         Destinations : 27       Routes : 27       
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.4.0/22  ISIS-L1 15   40          D   10.1.12.1       GigabitEthernet0/0/1
+```
+
+这是因为 AR1 上使用命令 **`summary 10.1.4.0 255.255.252.0 level-1 generate_null0_route`** 产生的 NULL0 路由的优先级为 255，低于 AR1 上接收到的对端 ISIS-L1 Pre 15 的同前缀聚合路由。
+
+```java{.line-numbers}
+[AR1-isis-1]display ip routing-table protocol isis inactive 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+ISIS routing table 
+         Destinations : 1        Routes : 1        
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.4.0/22  ISIS-L1 255  0               0.0.0.0         NULL0
+```
+
+接下来使用手工自动配置一条指向 null0 接口的聚合路由，**`ip route-static 10.1.4.0 255.255.252.0 null0 preference 5`**，正常情况下 AR1/AR2 上有更精确的明细路由，所以流量不会走 **`10.1.4.0/22 Null0`**，因为 IP 转发表遵循最长掩码匹配，真正的问题出现在某个明细网段故障时，比如 **`10.1.6.0/24`** 消失。
+
+```java{.line-numbers}
+[AR2]display ip routing-table
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        10.1.4.0/22  Static  5    0           D   0.0.0.0         NULL0
+        10.1.5.0/24  ISIS-L2 15   20          D   10.1.26.6       GigabitEthernet0/0/2
+        10.1.6.0/24  ISIS-L2 15   10          D   10.1.26.6       GigabitEthernet0/0/2
+[AR1]display ip routing-table 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public
+         Destinations : 27       Routes : 28       
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.4.0/22  Static  5    0           D   0.0.0.0         NULL0
+       10.1.5.0/24  ISIS-L2 15   10          D   10.1.15.5       GigabitEthernet0/0/2
+       10.1.6.0/24  ISIS-L2 15   20          D   10.1.15.5       GigabitEthernet0/0/2
+```
+
+但是 AR3 和 AR4 上的 **`10.1.4.0/22`** 路由条目如下所示，可以看到 **`10.1.4.0/22`** 的下一跳还是 **`10.1.34.4`**。因此假设 **`10.1.6.0`** 网段失效，那么 AR3 访问网络的 **`10.1.6.0/24`** 的数据包最先发送给 AR1，然后 AR1 上查不到明细路由，此时命中本地 **`10.1.4.0/22->NULL0`**，结果就是 AR1 直接丢弃这个数据包。
+
+```java{.line-numbers}
+<AR3>display ip routing-table 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public
+         Destinations : 24       Routes : 24       
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+    10.1.4.0/22  ISIS-L1 15   25          D   10.1.34.4       GigabitEthernet0/0/1
+```
 
 ## 3.IS-IS 度量及扩展
 
@@ -321,8 +387,8 @@ ISO 10589 为 IS-IS 定义了默认度量，就是我们常见的度量类型，
 
 这种度量类型我们把它叫做宽度量（Wide-metric）。华为 VRP 系统默认使用的是窄度量，可以使用命令 cost-style 修改度量类型，根据具体情况可将度量配置为以下几种类型的一种。
 
-- Compatible（兼容度量）：设备发送和接收的路由既可以使用窄度量，也可以使用宽度量。
-- Narrow（窄度量）：设备发送和接收的路由只能是窄度量。
-- Narrow-compatible（兼容窄度量）：设备发送的路由使用窄度量，接收的路由可以使用窄度量，也可以使用宽度量。
-- Wide（宽度量）：设备发送和接收的路由只能是宽度量。
-- Wide-compatible（兼容宽度量）：设备发送的路由使用宽度量，接收的路由可以使用窄度量，也可以使用宽度量。
+- **`Compatible（兼容度量）`**：设备发送和接收的路由既可以使用窄度量，也可以使用宽度量。
+- **`Narrow（窄度量）`**：设备发送和接收的路由只能是窄度量。
+- **`Narrow-compatible（兼容窄度量）`**：设备发送的路由使用窄度量，接收的路由可以使用窄度量，也可以使用宽度量。
+- **`Wide（宽度量）`**：设备发送和接收的路由只能是宽度量。
+- **`Wide-compatible（兼容宽度量）`**：设备发送的路由使用宽度量，接收的路由可以使用窄度量，也可以使用宽度量。
