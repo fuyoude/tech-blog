@@ -20,7 +20,7 @@ OOP即面向对象的程序设计，谈起了OOP，我们就不得不了解一�
 
 那么这种切面技术（AspectJ）是如何在 Java 中的应用呢？不必担心，对于 AspectJ，我们只会进行简单的了解，从而为理解 Spring 中的 AOP 打下良好的基础 (Spring AOP 与 AspectJ 实现原理上并不完全一致，但功能上是相似的，这点后面会分析)，毕竟 Spring 中已实现 AOP 主要功能，开发中直接使用 Spring 中提供的 AOP 功能即可，除非我们想单独使用 AspectJ 的其他功能。
 
-## 2. AspectJ 简介
+## 2.AspectJ 简介
 
 这里先进行一个简单案例的演示，然后引出 AOP 中一些晦涩难懂的抽象概念。编写一个 HelloWord 的类，然后利用 AspectJ 技术切入该类的执行过程。
 
@@ -385,11 +385,11 @@ public class UserDaoAspectJ {
     <img src="spring_static//10.png" width="650"/>
 </div>
 
-### 4.1 再谈 Spring AOP 术语
+### 4.1.再谈 Spring AOP 术语
 
 通过简单案例的分析，也就很容易知道，Spring AOP 的实现是遵循 AOP 规范的，特别是以 AspectJ（与 java 无缝整合）为参考，因此在 AOP 的术语概念上与前面分析的 AspectJ 的 AOP 术语是一样的，如切点 (pointcut) 定义需要应用通知的目标函数，通知则是那些需要应用到目标函数而编写的函数体，切面 (Aspect) 则是通知与切点的结合。织入 (weaving)，将 aspect 类应用到目标函数 (类) 的过程，只不过 Spring AOP 底层是通过动态代理技术实现罢了。
 
-### 4.2 定义切入点函数
+### 4.2.定义切入点函数
 
 在案例中，定义过滤切入点函数时，是直接把 execution 已定义匹配表达式作为值传递给通知类型的如下：
 
