@@ -270,12 +270,92 @@ bgp 500
 
 #### 2.1.2 BGP 全互联
 
-AR1 位于 AS 100，通过 eBGP 向 AR2 通告本地网络 10.1.1.0/24。AR2 接收该路由后，在 BGP 路由表中会记录其下一跳为 AR1 的地址 10.1.12.1。此时，该路由的 AS_PATH 中通常包含 AS 100，表明该前缀来自 AS 100。
+AR1 位于 AS 100，通过 eBGP 向 AR2 通告本地网络 **`10.1.1.0/24`**。AR2 接收该路由后，在 BGP 路由表中会记录其下一跳为 AR1 的地址 **`10.1.12.1`**。此时，该路由的 **`AS_PATH`** 中通常包含 AS 100，表明该前缀来自 AS 100。
 
-随后，AR2 会将该路由通告给 AS 234 内的 iBGP 对等体 AR3 和 AR4。需要注意，iBGP 在默认情况下不会修改路由的 NEXT_HOP 属性。因此，如果 AR2 不作额外处理，AR3 和 AR4 接收到的 10.1.1.0/24 路由，其下一跳仍然是 10.1.12.1，即 AR1 与 AR2 之间链路上 AR1 的地址。
+```java{.line-numbers}
+<AR2>display bgp routing-table 
+ BGP Local router ID is 2.2.2.2 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   10.1.1.0/24        10.1.12.1       0                     0      100i
+   i  10.1.5.0/24        10.1.45.5       0          100        0      500i
+```
 
-这会带来一个可达性问题：AR3 和 AR4 位于 AS 234 内部，通常只通过 IGP 学习 AS 内部的链路和 Loopback 地址；它们未必存在到 10.1.12.1 的路由。因此，即使 AR3、AR4 的 BGP 表中已经有 10.1.1.0/24，若下一跳 10.1.12.1 不可达，该 BGP 路由也无法被正常用于转发。
+随后，AR2 会将该路由通告给 AS 234 内的 iBGP 对等体 AR3 和 AR4。**<font color="red">需要注意，iBGP 在默认情况下不会修改路由的 **`NEXT_HOP`** 属性</font>**。因此，如果 AR2 不作额外处理，AR3 和 AR4 接收到的 **`10.1.1.0/24`** 路由，其下一跳仍然是 **`10.1.12.1`**，即 AR1 与 AR2 之间链路上 AR1 的地址。
 
-实际部署中，通常会在 AR2 向 iBGP 邻居发布该路由时配置 next-hop-local，使 AR2 将下一跳改写为自身的 Loopback 地址，例如 2.2.2.2。由于该 Loopback 地址通过 OSPF 等 IGP 在 AS 234 内可达，AR3 和 AR4 就能正确地将到达 10.1.1.0/24 的流量先转发给 AR2，再由 AR2 转发至 AR1。
+```java{.line-numbers}
+<AR3>display bgp routing-table 
+ BGP Local router ID is 3.3.3.3 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+   i  10.1.1.0/24        10.1.12.1       0          100        0      100i
+   i  10.1.5.0/24        10.1.45.5       0          100        0      500i
+<AR4>display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+   i  10.1.1.0/24        10.1.12.1       0          100        0      100i
+ *>   10.1.5.0/24        10.1.45.5       0                     0      500i
+```
 
-最后，AR4 再通过 eBGP 将该路由发布给 AS 500 中的 AR5。eBGP 通告路由时默认会修改下一跳，因此 AR5 接收 10.1.1.0/24 后，下一跳会变为 AR4 的对外接口地址 10.1.45.4。因此，AR5 访问 10.1.1.0/24 时，会先将报文发送给 AR4；AR4 再依据其 iBGP 和 IGP 路由，将流量转发至 AR2，最终到达 AR1。
+这会带来一个可达性问题，AR3 和 AR4 位于 AS 234 内部，它们路由表上不存在到 **`10.1.12.1`** 的路由。因此，即使 AR3、AR4 的 BGP 表中已经有 **`10.1.1.0/24`**，若下一跳 **`10.1.12.1`** 不可达，该 BGP 路由也无法被正常用于转发。
+
+实际部署中，通常会在 AR2 向 iBGP 邻居发布该路由时配置 **`next-hop-local`**，使 AR2 将下一跳改写为自身的 Loopback 地址，例如 **`10.1.2.2`**。由于该 Loopback 地址通过 OSPF 等 IGP 在 AS 234 内可达，AR3 和 AR4 就能正确地将到达 **`10.1.1.0/24`** 的流量先转发给 AR2，再由 AR2 转发至 AR1。在 AR2-AR4 上配置完成后，BGP 路由表如下所示：
+
+```java{.line-numbers}
+[AR3-bgp]display bgp routing-table
+ BGP Local router ID is 3.3.3.3 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.1.1.0/24        10.1.2.2        0          100        0      100i
+ *>i  10.1.5.0/24        10.1.4.4        0          100        0      500i
+[AR3-bgp]displ	
+[AR3-bgp]display ip ro	
+[AR3-bgp]display ip routing-table 10.1.2.2
+Route Flags: R - relay, D - download to fib
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.2.2/32  OSPF    10   1           D   10.1.23.2       GigabitEthernet0/0/0
+[AR4-bgp]display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.1.1.0/24        10.1.2.2        0          100        0      100i
+ *>   10.1.5.0/24        10.1.45.5       0                     0      500i
+```
+
+最后，AR4 再通过 eBGP 将该路由发布给 AS 500 中的 AR5。**<font color="red">eBGP 通告路由时默认会修改下一跳</font>**，因此 AR5 接收 **`10.1.1.0/24`** 后，下一跳会变为 AR4 的对外接口地址 **`10.1.45.4`**。因此，AR5 访问 **`10.1.1.0/24`** 时，会先将报文发送给 AR4；AR4 再依据其 iBGP 和 IGP 路由，将流量转发至 AR2，最终到达 AR1。
+
+```java{.line-numbers}
+<AR5>display bgp routing-table 
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   10.1.1.0/24        10.1.45.4                             0      234 100i
+ *>   10.1.5.0/24        0.0.0.0         0                     0      i
+```
+
+当 AR5 向 **`10.1.1.1`** 发起 Ping 时，会根据路由表中到达 **`10.1.1.0/24`** 的 eBGP 路由，将报文发送给下一跳 AR4 的接口地址 **`10.1.45.4`**。AR4 学到该路由后，其 BGP 下一跳为 AR2 的 Loopback 地址 **`10.1.2.2`**。这是因为 AR2 向 iBGP 邻居发布路由时使用了 **`next-hop-local`**，将下一跳改写为自身的 Loopback 地址。
+
+**<font color="red">AR4 通过 OSPF 递归解析到达 **`10.1.2.2`** 的路径，发现实际下一跳是 AR3 的 `10.1.34.3`</font>**，因此将报文转发给 AR3。AR3 的 BGP 路由下一跳同样为 **`10.1.2.2`**。AR3 再通过 OSPF 查询到达该 Loopback 地址的路径，实际下一跳为 AR2 的 **`10.1.23.2`**，于是将报文转发给 AR2。
+
+AR2 从 AR1 经 eBGP 学到 **`10.1.1.0/24`**，其下一跳为 AR1 的 **`10.1.12.1`**。AR2 直接通过 **`Serial1/0/0`** 将报文转发给 AR1，最终到达 **`10.1.1.1`**。**这里的关键是 **`10.1.2.2`** 是 BGP 标记的逻辑下一跳；AR3、AR4 通过 OSPF 将其递归解析为实际可直接转发的下一跳地址**。
+
+```java{.line-numbers}
+<AR5>ping -a 10.1.5.5 10.1.1.1
+  PING 10.1.1.1: 56  data bytes, press CTRL_C to break
+    Reply from 10.1.1.1: bytes=56 Sequence=1 ttl=252 time=130 ms
+    Reply from 10.1.1.1: bytes=56 Sequence=2 ttl=252 time=110 ms
+    Reply from 10.1.1.1: bytes=56 Sequence=3 ttl=252 time=130 ms
+    Reply from 10.1.1.1: bytes=56 Sequence=4 ttl=252 time=90 ms
+    Reply from 10.1.1.1: bytes=56 Sequence=5 ttl=252 time=110 ms
+
+  --- 10.1.1.1 ping statistics ---
+    5 packet(s) transmitted
+    5 packet(s) received
+    0.00% packet loss
+    round-trip min/avg/max = 90/114/130 ms
+```
+
+### 2.2 BGP 部分互联
