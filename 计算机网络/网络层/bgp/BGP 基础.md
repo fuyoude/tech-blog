@@ -112,3 +112,170 @@ R1 <------> R2
 
 ### 2.1 BGP 全互联
 
+<div align="center">
+    <img src="bgp_static/3.png" width="800"/>
+</div>
+
+我们以上面的拓扑图来介绍 BGP 全互联。AR1-AR5 的基础配置如下所示：
+
+```java{.line-numbers}
+// AR1
+#
+sysname AR1
+#
+interface Serial0/0/0
+ link-protocol ppp
+ ip address 10.1.12.1 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.1.1.1 255.255.255.0 
+#
+bgp 100
+ router-id 1.1.1.1
+ peer 10.1.12.2 as-number 234 
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 10.1.1.0 255.255.255.0 
+  peer 10.1.12.2 enable
+// AR2
+#
+sysname AR2
+#
+interface Serial0/0/0
+ link-protocol ppp
+ ip address 10.1.12.2 255.255.255.0 
+#
+interface GigabitEthernet0/0/0
+ ip address 10.1.23.2 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.1.2.2 255.255.255.0 
+#
+bgp 234
+ router-id 2.2.2.2
+ peer 10.1.3.3 as-number 234 
+ peer 10.1.3.3 connect-interface LoopBack0
+ peer 10.1.4.4 as-number 234 
+ peer 10.1.4.4 connect-interface LoopBack0
+ peer 10.1.12.1 as-number 100 
+ #
+ ipv4-family unicast
+  undo synchronization
+  peer 10.1.3.3 enable
+  peer 10.1.4.4 enable
+  peer 10.1.12.1 enable
+#
+ospf 1 router-id 2.2.2.2 
+ area 0.0.0.0 
+  network 10.1.2.2 0.0.0.0 
+  network 10.1.23.0 0.0.0.255 
+// AR3
+#
+sysname AR3
+#
+interface GigabitEthernet0/0/0
+ ip address 10.1.23.3 255.255.255.0 
+#
+interface GigabitEthernet0/0/1
+ ip address 10.1.34.3 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.1.3.3 255.255.255.0 
+#
+bgp 234
+ router-id 3.3.3.3
+ peer 10.1.2.2 as-number 234 
+ peer 10.1.2.2 connect-interface LoopBack0
+ peer 10.1.4.4 as-number 234 
+ peer 10.1.4.4 connect-interface LoopBack0
+ #
+ ipv4-family unicast
+  undo synchronization
+  peer 10.1.2.2 enable
+  peer 10.1.4.4 enable
+#
+ospf 1 router-id 3.3.3.3 
+ area 0.0.0.0 
+  network 10.1.3.3 0.0.0.0 
+  network 10.1.23.0 0.0.0.255 
+  network 10.1.34.0 0.0.0.255 
+// AR4
+#
+sysname AR4
+#
+interface Serial0/0/0
+ link-protocol ppp
+ ip address 10.1.45.4 255.255.255.0 
+#
+interface GigabitEthernet0/0/1
+ ip address 10.1.34.4 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.1.4.4 255.255.255.0 
+#
+bgp 234
+ router-id 4.4.4.4
+ peer 10.1.2.2 as-number 234 
+ peer 10.1.2.2 connect-interface LoopBack0
+ peer 10.1.3.3 as-number 234 
+ peer 10.1.3.3 connect-interface LoopBack0
+ peer 10.1.45.5 as-number 500 
+ #
+ ipv4-family unicast
+  undo synchronization
+  peer 10.1.2.2 enable
+  peer 10.1.3.3 enable
+  peer 10.1.45.5 enable
+#
+ospf 1 router-id 4.4.4.4 
+ area 0.0.0.0 
+  network 10.1.4.4 0.0.0.0 
+  network 10.1.34.0 0.0.0.255 
+// AR5
+#
+sysname AR5
+#
+interface Serial0/0/0
+ link-protocol ppp
+ ip address 10.1.45.5 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.1.5.5 255.255.255.0 
+#
+bgp 500
+ router-id 5.5.5.5
+ peer 10.1.45.4 as-number 234 
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 10.1.5.0 255.255.255.0 
+  peer 10.1.45.4 enable
+```
+
+#### 2.1.1 connect-interface 配置
+
+以 AR2 的配置为例，在实际网络中，iBGP 邻居通常使用 Loopback 地址建立，而不是直接使用物理接口地址。因为 Loopback 是逻辑接口，不依赖某一条具体物理链路，更适合作为路由器稳定的逻辑标识。
+
+```java{.line-numbers}
+ peer 10.1.4.4 as-number 234 
+ peer 10.1.4.4 connect-interface LoopBack0
+```
+
+例如，AR2 的 Loopback0 为 **`10.1.2.2`**，AR4 的 Loopback0 为 **`10.1.4.4`**，两者通过 **`AR2->AR3->AR4`** 建立 iBGP。此时 BGP 会话的端点始终是 **`10.1.2.2<->10.1.4.4`**，实际经过哪条物理路径则由 IGP 决定。如果原路径故障，但 IGP 能重新找到到对端 Loopback 的备用路径，BGP 会话就有机会继续保持或重新建立。**<font color="red">需要注意，Loopback 本身并不会提供冗余，真正的前提仍然是底层存在其他可达路径</font>**。
+
+如果直接使用物理接口地址建立邻居，例如使用 **`10.1.23.2`**，一旦该接口失效，即使网络中还有其他路径可以到达对端，原来以该接口地址为端点的 BGP 会话通常仍会中断。当使用 Loopback 接口的 IP 地址建立 BGP 连接时，建议对等体两端同时配置命令 **`peer connect-interface`**，保证两端 TCP 连接的接口和地址的正确性。
+
+若 AR2 配置了 **`peer 10.1.4.4`**，但未配置 **`connect-interface LoopBack0`**，AR2 主动连接 AR4 时可能以出接口地址 **`10.1.23.2`** 作为源地址。若 AR4 仅配置 peer **`10.1.2.2`**，则不会将来自 **`10.1.23.2`** 的连接识别为已配置邻居，AR2 发起的连接可能被拒绝。
+
+#### 2.1.2 BGP 全互联
+
+AR1 位于 AS 100，通过 eBGP 向 AR2 通告本地网络 10.1.1.0/24。AR2 接收该路由后，在 BGP 路由表中会记录其下一跳为 AR1 的地址 10.1.12.1。此时，该路由的 AS_PATH 中通常包含 AS 100，表明该前缀来自 AS 100。
+
+随后，AR2 会将该路由通告给 AS 234 内的 iBGP 对等体 AR3 和 AR4。需要注意，iBGP 在默认情况下不会修改路由的 NEXT_HOP 属性。因此，如果 AR2 不作额外处理，AR3 和 AR4 接收到的 10.1.1.0/24 路由，其下一跳仍然是 10.1.12.1，即 AR1 与 AR2 之间链路上 AR1 的地址。
+
+这会带来一个可达性问题：AR3 和 AR4 位于 AS 234 内部，通常只通过 IGP 学习 AS 内部的链路和 Loopback 地址；它们未必存在到 10.1.12.1 的路由。因此，即使 AR3、AR4 的 BGP 表中已经有 10.1.1.0/24，若下一跳 10.1.12.1 不可达，该 BGP 路由也无法被正常用于转发。
+
+实际部署中，通常会在 AR2 向 iBGP 邻居发布该路由时配置 next-hop-local，使 AR2 将下一跳改写为自身的 Loopback 地址，例如 2.2.2.2。由于该 Loopback 地址通过 OSPF 等 IGP 在 AS 234 内可达，AR3 和 AR4 就能正确地将到达 10.1.1.0/24 的流量先转发给 AR2，再由 AR2 转发至 AR1。
+
+最后，AR4 再通过 eBGP 将该路由发布给 AS 500 中的 AR5。eBGP 通告路由时默认会修改下一跳，因此 AR5 接收 10.1.1.0/24 后，下一跳会变为 AR4 的对外接口地址 10.1.45.4。因此，AR5 访问 10.1.1.0/24 时，会先将报文发送给 AR4；AR4 再依据其 iBGP 和 IGP 路由，将流量转发至 AR2，最终到达 AR1。
