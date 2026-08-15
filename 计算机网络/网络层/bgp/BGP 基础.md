@@ -358,4 +358,195 @@ AR2 从 AR1 经 eBGP 学到 **`10.1.1.0/24`**，其下一跳为 AR1 的 **`10.1.
     round-trip min/avg/max = 90/114/130 ms
 ```
 
-### 2.2 BGP 部分互联
+### 2.2 BGP 部分互联之一
+
+<div align="center">
+    <img src="bgp_static/4.png" width="800"/>
+</div>
+
+#### 2.2.1 控制层面
+
+在控制层面，AR1 将本地网段 **`10.1.1.0/24`** 通过 BGP 发布给 AR2。由于 AR1 与 AR2 分别位于 AS 100 和 AS 234，该路由经 eBGP 传递到 AR2 后，其下一跳为 AR1 的接口地址 **`10.1.12.1`**，**`AS_PATH`** 中包含 AS 100，
+
+```java{.line-numbers}
+<AR2>display bgp routing-table 
+ BGP Local router ID is 2.2.2.2 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   10.1.1.0/24        10.1.12.1       0                     0      100i
+ *>i  10.1.5.0/24        10.1.4.4        0          100        0      500i
+<AR2>display ip routing-table 10.1.1.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+    10.1.1.0/24     EBGP    255   0           D  10.1.12.1       Serial0/0/0
+```
+
+AR2 随后通过 iBGP 将该路由通告给 AS 234 内的 AR4。iBGP 默认不修改 BGP 路由的 **`NEXT_HOP`** 属性，因此若不进行额外配置，AR4 接收到的 **`10.1.1.0/24`** 路由下一跳仍会是 **`10.1.12.1`**。由于 **`10.1.12.1`** 是 AR1 与 AR2 之间的外部链路地址，AR4 通常无法通过 AS 234 内的 OSPF 路由到达该地址，导致该 BGP 路由因下一跳不可达而不能被正常使用或发布。
+
+为解决该问题，AR2 在向 AR4 发布 iBGP 路由时配置 **`next-hop-local`**，将路由下一跳改写为 AR2 的 Loopback 地址 **`10.1.2.2`**。该 Loopback 地址已经通过 OSPF 在 AS 234 内发布，因此 AR4 可以经由内部网络到达 **`10.1.2.2`**，从而使 **`10.1.1.0/24`** 成为一条有效、可用的 BGP 路由。
+
+```java{.line-numbers}
+<AR4>display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.1.1.0/24        10.1.2.2        0          100        0      100i
+ *>   10.1.5.0/24        10.1.45.5       0                     0      500i
+```
+
+最后，AR4 将该路由通过 eBGP 通告给 AS 500 内的 AR5。eBGP 通告时会默认将下一跳修改为本端对外接口地址，因此 AR5 接收到 **`10.1.1.0/24`** 后，下一跳为 AR4 的 **`10.1.45.4`**。至此，AR5 获得了到达 **`10.1.1.0/24`** 的完整 BGP 路由信息。
+
+```java{.line-numbers}
+<AR5>display bgp routing-table 
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   10.1.1.0/24        10.1.45.4                             0      234 100i
+ *>   10.1.5.0/24        0.0.0.0         0                     0      i
+```
+
+#### 2.2.2 数据层面
+
+需要先补充一个关键前提：AR3 不运行 BGP 本身并不必然导致丢包；真正导致丢包的原因是 AR3 的路由表中没有到达目的网段 10.1.1.0/24 的路由。 在当前实验中，AR3 只通过 OSPF 学习 AS 234 内部的基础设施路由，并未学习 10.1.1.0/24，因此会形成数据黑洞。
+
+当 AR5 向 **`10.1.1.1`** 发起 Ping 时，AR5 将报文发送至下一跳 AR4 的接口地址 **`10.1.45.4`**。AR4 收到报文后，查询到 **`10.1.1.0/24`** 的 BGP 路由，其逻辑下一跳为 AR2 的 Loopback 地址 **`10.1.2.2`**。AR4 再通过 OSPF 对该下一跳进行递归解析，发现到达 **`10.1.2.2`** 的实际下一跳为 AR3 的 **`10.1.34.3`**，于是将报文转发给 AR3。
+
+**<font color="red">报文到达 AR3 后，IP 报文的目的地址仍然是 `10.1.1.1`</font>**。AR3 必须对目的地址 **`10.1.1.1`** 重新执行路由查找。然而，AR3 未运行 BGP，且 OSPF 中也没有发布 **`10.1.1.0/24`** 的路由，因此 AR3 找不到匹配路由，只能丢弃该报文。
+
+```java{.line-numbers}
+<AR3>display ip routing-table 10.1.1.0	
+<AR3>display ospf routing 
+	 OSPF Process 1 with Router ID 3.3.3.3
+		  Routing Tables 
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 10.1.3.3/32        0     Stub       10.1.3.3        3.3.3.3         0.0.0.0
+ 10.1.23.0/24       1     Transit    10.1.23.3       3.3.3.3         0.0.0.0
+ 10.1.34.0/24       1     Transit    10.1.34.3       3.3.3.3         0.0.0.0
+ 10.1.2.2/32        1     Stub       10.1.23.2       2.2.2.2         0.0.0.0
+ 10.1.4.4/32        1     Stub       10.1.34.4       4.4.4.4         0.0.0.0
+ Total Nets: 5  
+ Intra Area: 5  Inter Area: 0  ASE: 0  NSSA: 0 
+```
+
+这就是该拓扑中的数据黑洞，控制层面上，AR2 与 AR4 已通过 iBGP 成功学习和通告了 BGP 路由；但数据层面上，作为中转节点的 AR3 缺少到达业务前缀 **`10.1.1.0/24`** 的转发路由，导致流量无法继续转发至 AR2。
+
+#### 2.2.3 同步
+
+第一种解决办法就是在 AR2 上将 BGP 中的 **`10.1.1.0/24`** 路由引入到 OSPF 中，具体策略如下所示：
+
+```java{.line-numbers}
+ospf 1 router-id 2.2.2.2 
+ import-route bgp route-policy AR1-BGP-TO-OSPF
+#
+route-policy AR1-BGP-TO-OSPF permit node 10 
+ if-match ip-prefix AR1-BGP-TO-OSPF 
+#
+ip ip-prefix AR1-BGP-TO-OSPF index 10 permit 10.1.1.0 24
+```
+
+上述策略配置完成之后，AR2 把这条 BGP 路由转换成 OSPF Type-5 AS-External LSA，AR2 变为 ASBR。根据 RFC 2328 的文档，when calculating the inter-area routes, If the LSA was originated by the calculating router itself, examine the next LSA. when Calculating AS external routes, If the LSA was originated by the calculating router itself, examine the next LSA. 也就是在计算区域间路由和外部路由的时候，如果 LSA 是由计算路由器自己产生的，那么就不再使用此 LSA 计算路由。
+
+因此，AR2 会在 OSPF LSDB 中保存并泛洪自己产生的 Type-5 LSA，但在计算 OSPF AS 外部路由时，不会利用这条由自己产生的 LSA 生成一条 OSPF 外部路由。
+
+```java{.line-numbers}
+<AR2>display ospf routing 
+
+	 OSPF Process 1 with Router ID 2.2.2.2
+		  Routing Tables 
+
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 10.1.2.2/32        0     Stub       10.1.2.2        2.2.2.2         0.0.0.0
+ 10.1.23.0/24       1     Transit    10.1.23.2       2.2.2.2         0.0.0.0
+ 10.1.3.3/32        1     Stub       10.1.23.3       3.3.3.3         0.0.0.0
+ 10.1.4.4/32        2     Stub       10.1.23.3       4.4.4.4         0.0.0.0
+ 10.1.34.0/24       2     Transit    10.1.23.3       4.4.4.4         0.0.0.0
+ Total Nets: 5  
+ Intra Area: 5  Inter Area: 0  ASE: 0  NSSA: 0 
+<AR2>display ip routing-table 10.1.1.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.1.0/24  EBGP    255  0           D   10.1.12.1       Serial0/0/0
+<AR2>display ospf lsdb self-originate 
+	 OSPF Process 1 with Router ID 2.2.2.2
+		 Link State Database 
+		 AS External Database
+ Type      LinkState ID    AdvRouter          Age  Len   Sequence   Metric
+ External  10.1.1.0        2.2.2.2           1177  36    80000004       1
+<AR2>display ospf routing 
+	 OSPF Process 1 with Router ID 2.2.2.2
+		  Routing Tables 
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 10.1.2.2/32        0     Stub       10.1.2.2        2.2.2.2         0.0.0.0
+ 10.1.23.0/24       1     Transit    10.1.23.2       2.2.2.2         0.0.0.0
+ 10.1.3.3/32        1     Stub       10.1.23.3       3.3.3.3         0.0.0.0
+ 10.1.4.4/32        2     Stub       10.1.23.3       4.4.4.4         0.0.0.0
+ 10.1.34.0/24       2     Transit    10.1.23.3       4.4.4.4         0.0.0.0
+ Total Nets: 5  
+ Intra Area: 5  Inter Area: 0  ASE: 0  NSSA: 0
+```
+
+AR3 收到了 AR2 产生的 Type-5 LSA。由于 AR3 本身没有 BGP 路由，所以它根据该 LSA 计算出对应的 OSPF 路由，并最终放到全局路由表中。
+
+```java{.line-numbers}
+[AR3]display ospf routing
+	 OSPF Process 1 with Router ID 3.3.3.3
+		  Routing Tables 
+ Routing for ASEs
+ Destination        Cost      Type       Tag         NextHop         AdvRouter
+ 10.1.1.0/24        1         Type2      1           10.1.23.2       2.2.2.2
+ Total Nets: 6  
+ Intra Area: 5  Inter Area: 0  ASE: 1  NSSA: 0 
+[AR3]display ip routing-table 10.1.1.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.1.0/24  O_ASE   150  1           D   10.1.23.2       GigabitEthernet0/0/0
+```
+
+AR4 从 AR2 经 iBGP 学到 **`10.1.1.0/24`**，同时，AR4 又通过 OSPF 学到同一前缀的外部路由：**`10.1.1.0/24  O_ASE -> 10.1.34.3`**。在华为设备的全局路由表选路中，路由优先级数值越小越优。OSPF ASE 的优先级为 150，低于 BGP 的 255，因此最终由 OSPF ASE 路由安装到全局 IP 路由表。
+
+```java{.line-numbers}
+<AR4>display ospf routing 
+	 OSPF Process 1 with Router ID 4.4.4.4
+		  Routing Tables 
+ Routing for ASEs
+ Destination        Cost      Type       Tag         NextHop         AdvRouter
+ 10.1.1.0/24        1         Type2      1           10.1.34.3       2.2.2.2
+ Total Nets: 6  
+ Intra Area: 5  Inter Area: 0  ASE: 1  NSSA: 0 
+[AR4]display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.1.1.0/24        10.1.2.2        0          100        0      100i
+ *>   10.1.5.0/24        10.1.45.5       0                     0      500i
+[AR4]display ip routing-table 10.1.1.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.1.0/24  O_ASE   150  1           D   10.1.34.3       GigabitEthernet0/0/0
+```
+
+根据 RFC 1772，In order to minimize such routing problems, border gateway (A) should not advertise to any of its external peers a route to some set of exterior destinations associated with a given address prefix X via border gateway (B) until all the interior gateways within the AS are ready to route traffic destined to these destinations via the correct exit border gateway (B). In other words, interior routing should converge on the proper exit gateway before/advertising routes via that exit gateway to external peers.
+
+也就是说，边界路由器 A 从本 AS 内的另一个边界路由器 B 获得了某个外部前缀 X 的 BGP 路由后，**<font color="red">在 AS 内部所有路由器都已经能够把前往 X 的流量正确送到出口 B 之前，A 不应该把 X 再通告给自己的外部 BGP 邻居</font>**。这么做的原因就是 BGP 信息和 IGP 信息在 AS 内部传播、收敛的速度可能不同。假设 A 已经通过 iBGP 得知前往 X 应该走 B，但是此时 AS 内部的 IGP 还没有收敛到能够把流量送到 B，那么就会出现一个时间窗口，在这个窗口中可能产生 incorrect routing 或 black holes（错误路由或黑洞）。
+
+因此，**<font color="red">同步规则要求：当路由器从 iBGP 邻居学到一条路由时，若本地 IGP 中没有同一前缀的可达路由，则该 BGP 路由不能被用于向 eBGP 邻居发布</font>**。
+
+在上述实验拓扑中，AR4 从 AR2 经 iBGP 学到 **`10.1.1.0/24`**。如果 AR4 启用了同步，但 OSPF 中没有 **`10.1.1.0/24`**，AR4 就不会把该路由优选并发布给 AR5。这样虽然 AR5 暂时学不到路由，但避免了 AR5 学到路由、发送流量后却在 AR3 丢弃的黑洞。当 AR2 将 **`10.1.1.0/24`** 导入 OSPF 后，此时可以认为该路由在 BGP 与 IGP 之间同步，AR4 才可将其发布给 AR5。
+
+### 2.3 BGP 部分互联之二
+
