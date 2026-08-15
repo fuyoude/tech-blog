@@ -454,10 +454,8 @@ ip ip-prefix AR1-BGP-TO-OSPF index 10 permit 10.1.1.0 24
 
 ```java{.line-numbers}
 <AR2>display ospf routing 
-
 	 OSPF Process 1 with Router ID 2.2.2.2
 		  Routing Tables 
-
  Routing for Network 
  Destination        Cost  Type       NextHop         AdvRouter       Area
  10.1.2.2/32        0     Stub       10.1.2.2        2.2.2.2         0.0.0.0
@@ -550,3 +548,27 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
 
 ### 2.3 BGP 部分互联之二
 
+<div align="center">
+    <img src="bgp_static/5.png" width="850"/>
+</div>
+
+在该拓扑中，AR1 位于 AS 100，AR2、AR3 和 AR4 位于 AS 234，AR5 位于 AS 500。首先，AR1 将本地网段 **`10.1.1.0/24`** 通过 eBGP 通告给 AR2。AR2 学到该 BGP 路由后，再通过 iBGP 将其发布给 AS 234 内的其他 BGP 路由器。AR3 随后由于 BGP 水平分割原则，不会将 **`10.1.1.0/24`** 通告给 AR4。如下所示，在 AR3 上学习到 **`10.1.1.0/24`** 的路由，但是在 AR4 上并没有学习到该路由。
+
+```java{.line-numbers}
+[AR3-bgp]display bgp routing-table 
+ BGP Local router ID is 10.1.23.3 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.1.1.0/24        10.1.2.2        0          100        0      100i
+ *>i  10.1.5.0/24        10.1.4.4        0          100        0      500i
+[AR4-bgp]display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 1
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   10.1.5.0/24        10.1.45.5       0                     0      500i
+```
+根据 RFC 4271，When a BGP speaker receives an UPDATE message from an internal peer, the receiving BGP speaker SHALL NOT re-distribute the routing information contained in that UPDATE message to other internal peers (unless the speaker acts as a BGP Route Reflector).也就是说，**<font color="red">如果 BGP Speaker 从本 AS 内的另一个 BGP Speaker 收到 UPDATE，就不能把其中的路由再次分发给本 AS 内的其他 BGP Speaker</font>**。
+
+如果网络中还存在 AR6，并且相关路由器通过同一 AS 内的 iBGP 继续互联，那么路由可能在多个 iBGP 节点之间反复传播。**<font color="red">由于 iBGP 通告通常不会在 **`AS_PATH`** 中追加本 AS 号，单纯依靠 eBGP 的 **`AS_PATH`** 防环机制并不能解决这种 AS 内部传播问题</font>**。因此，需要依靠 iBGP 水平分割规则，禁止普通 iBGP 路由器将从一个 iBGP 邻居学到的路由再次通告给其他 iBGP 邻居。
+
+BGP 水平分割这一传播限制又直接带来了传统 IBGP 的 Full Mesh（全连接）要求。假设 AS100 内存在 R1、R2、R3 三台 BGP 路由器，如果 R1 将一条路由通过 IBGP 通告给 R2，R2 不能再代替 R1 将该路由继续通告给 R3。因此，为了让 R3 同样获得 R1 的路由，R1 必须直接与 R3 建立 IBGP 会话；同理，R2 与 R3 之间也必须建立 IBGP 会话。最终三台设备需要形成 **`R1<->R2`**、**`R1<->R3`**、**`R2<->R3`** 的逻辑全连接。因此，传统 IBGP 中一个 AS 内的 BGP Speakers 通常需要组成 Full Mesh；如果有 N 台 IBGP Speaker，则需要维护 N×(N−1)/2 条 IBGP 会话。
