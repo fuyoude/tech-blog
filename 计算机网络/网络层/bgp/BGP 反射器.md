@@ -377,7 +377,7 @@ Border Gateway Protocol - UPDATE Message
 
 ## 6.BGP 反射器组网实验
 
-如下图所示，AS300 为某企业网络，要求为其设计一个内部网络有两个核心节点 Core1（R1）和 Core2（R2）、三个分支节点，分别为 C1（R3）、C2（R4）、C3（R5）。C2 与 C3 双归属到一个网络，同时能接收该网络通告的两条相同路由 **`100.1.1.0/24`**、**`200.1.1.0/24`**，为满足新业务扩充，新加入了节点 B1（R6）和 B2（R7）。
+如下图所示，AS300 为某企业网络，要求为其设计一个内部网络有两个核心节点 Core1 和 Core2、三个分支节点，分别为 C1、C2、C3。C2 与 C3 双归属到一个网络，同时能接收该网络通告的两条相同路由 **`100.1.1.0/24`**、**`200.1.1.0/24`**，为满足新业务扩充，新加入了节点 B1 和 B2。
 
 组网需求如下：
 
@@ -390,8 +390,7 @@ Border Gateway Protocol - UPDATE Message
 
 - 要求 C1 访问 **`100.1.1.0`** 网段选择经过 C2，访问 **`200.1.1.0`** 网段选择经过 C3；
 - 要求 C1 访问 **`100.1.1.0`** 网段选择经过 Core1，访问 **`200.1.1.0`** 网段选择经过 Core2；
-- 要求在 Core1 和 Core2 上来实现路由的控制；
-- AS100 访问 AS200 不能将 AS300 作为穿越 AS；
+- AS100 访问 AS200 或者 AS200 访问 AS100 不能将 AS300 作为穿越 AS；
 
 <div align="center">
     <img src="bgp_static/17.png" width="850"/>
@@ -401,13 +400,19 @@ Border Gateway Protocol - UPDATE Message
 
 #### 6.1.1 组网需求1
 
-需求 1 分析，由于分支节点之间不能直接交互路由信息，因此 C1、C2、C3 之间没有直接的物理连线，都与两台核心路由器相连（Core1 和 Core2），两台核心设备部署为路由反射器 RR，各分支部署为客户端 Client，这样就可以将各自分支之间的路由通过 RR 来反射。
+由于分支节点之间不能直接交互路由信息，因此 C1、C2、C3 之间没有直接的物理连线，都与两台核心路由器相连（Core1 和 Core2），两台核心设备部署为路由反射器 RR，各分支部署为客户端 Client，这样就可以将各自分支之间的路由通过 RR 来反射。
 
-需求 2 分析：由于新加入的节点（B1 和 B2）之间不能学习各自路由，但是可以学习其他所有路由，那么将 B1 和 B2 作为非客户端，两台设备之间无任何物理连线，且只与 Core2 相连。B1、B2 均仅与 Core2 建立 iBGP 邻居，并在 Core2 上作为 RR 的 Non-Client。根据 BGP 路由反射规则，RR 从一个 Non-Client 学到的路由不会反射给另一个 Non-Client，因此 B1 与 B2 无法学习对方的业务路由。而来自 RR Client 及 eBGP 邻居的路由仍可正常发布给两者。
+#### 6.1.2 组网需求2
 
-需求 3 分析：将 C1、C2、C3 都双上连到 Core1 和 Core2，且都作为两个 RR 的客户端，实现网络的冗余性和可靠性。
+由于新加入的节点（B1 和 B2）之间不能学习各自路由，但是可以学习其他所有路由，那么将 B1 和 B2 作为非客户端，两台设备之间无任何物理连线，且只与 Core2 相连。B1、B2 均仅与 Core2 建立 iBGP 邻居，并在 Core2 上作为 RR 的 Non-Client。根据 BGP 路由反射规则，RR 从一个 Non-Client 学到的路由不会反射给另一个 Non-Client，因此 B1 与 B2 无法学习对方的业务路由。而来自 RR Client 及 eBGP 邻居的路由仍可正常发布给两者。
 
-需求 4 分析：在该需求中，B1、B2 均作为 Core2 的 Non-Client iBGP Peer。为了让 B1、B2 既能够学习来自 AS100 的路由，又保持彼此之间不直接学习对方路由，**<font color="red">可以将 Core1 配置为 Core2 的 Client</font>**。需要注意，Core1 是 Core2 的 Client 并不意味着 Core2 同时也是 Core1 的 Client。
+#### 6.1.3 组网需求3
+
+将 C1、C2、C3 都双上连到 Core1 和 Core2，且都作为两个 RR 的客户端，实现网络的冗余性和可靠性。
+
+#### 6.1.4 组网需求4
+
+在该需求中，B1、B2 均作为 Core2 的 Non-Client iBGP Peer。为了让 B1、B2 既能够学习来自 AS100 的路由，又保持彼此之间不直接学习对方路由，**<font color="red">可以将 Core1 配置为 Core2 的 Client</font>**。需要注意，Core1 是 Core2 的 Client 并不意味着 Core2 同时也是 Core1 的 Client。
 
 对于 AS100 到 B1、B2 的方向，AS100 首先通过 eBGP 将路由通告给 Core1。**<font color="red">这里要特别注意 Core1 从 AS100 学到的是 eBGP 路由，并不是反射路由。华为官方明确规定，BGP Speaker 从 eBGP Peer 学到的最佳路由，可以通告给其所有符合策略要求的 BGP Peer</font>**。在 RR 场景下，从 eBGP Peer 学到的路由可以发布给所有 Client 和 Non-Client。 因此 Core1 可以把 AS100 路由通过 iBGP 发送给 Core2。由于 Core1 在 Core2 上被配置为 Client，Core2 收到该路由并选为最佳路径后，就可以发送给所有的客户机和非客户机，从而将路由继续反射给 B1 和 B2。
 
@@ -512,7 +517,7 @@ Core1 同时获得了来自 C2、C3 以及 Core2 RR 的候选路径，其中直�
 
 #### 6.2.2 路由控制需求2
 
-默认情况下，路由反射器是不能在出口应用策略修改路径属性的，目的是为了防止环路，因此需要通过配置命令 **`reflect change-path-attribute`** 来允许修改出口的策略。因此可以改为在 C1 上使用 **`route-policy`** 路由策略 **`apply ip-address next-hop <IPv4地址>`** 来强制修改下一跳，即采用核心节点先完成 C2/C3 的路径选择，C1 再根据业务前缀指定下一跳的方式实现。具体配置如下所示，该策略匹配 **`100.1.1.0/24`** 后将下一跳设置为 Core1 的 **`10.0.11.1`**，匹配 **`200.1.1.0/24`** 后将下一跳设置为 Core2 的 **`10.0.21.1`**。
+默认情况下，默认不能通过出口策略修改反射路由的路径属性，目的是为了防止环路，因此需要通过配置命令 **`reflect change-path-attribute`** 来允许修改出口的策略。因此可以改为在 C1 上使用 **`route-policy`** 路由策略 **`apply ip-address next-hop <IPv4地址>`** 来强制修改下一跳，即采用核心节点先完成 C2/C3 的路径选择，C1 再根据业务前缀指定下一跳的方式实现。具体配置如下所示，该策略匹配 **`100.1.1.0/24`** 后将下一跳设置为 Core1 的 **`10.0.11.1`**，匹配 **`200.1.1.0/24`** 后将下一跳设置为 Core2 的 **`10.0.21.1`**。
 
 ```java{.line-numbers}
 route-policy FROM_CORE1 permit node 10 
@@ -601,3 +606,85 @@ Original nexthop: 10.0.21.1
 ```
 
 根据上述 tracert 结果，可以确认 **`200.1.1.0/24`** 的实际访问路径稳定为 **`C1->Core2->C3->200.1.1.0/24`**，**`C1->Core1->C2->100.1.1.0/24`**。
+
+#### 6.2.3 路由控制需求3
+
+为了防止 AS 300 成为外部 AS 100 与 AS 200 之间的穿越（Transit）AS，应在 AS 300 向外部 EBGP 邻居发布路由时进行出方向过滤，**<font color="red">只允许 AS 300 本地始发的路由向外通告，禁止将从一个外部 AS 学到的路由再通告给另一个外部 AS</font>**。可以使用 **`as-path-filter`** 实现。由于 AS 300 本地始发路由在本地 BGP 表中的 **`AS_PATH`** 为空，因此可以使用正则表达式 **`^$`** 匹配这类路由，并将其设置为 permit；其他从外部 AS 学到的路由，其 **`AS_PATH`** 非空，无法匹配 **`^$`**，因此被默认拒绝。最后，将该 **`AS-Path Filter`** 分别应用在 AS 300 面向 AS 100 和 AS 200 的 EBGP 邻居 export 方向，即可避免 AS 100 与 AS 200 通过 AS 300 进行中转，从而保证 AS 300 不成为穿越 AS。
+
+总的来说，就是当 AS300 向外部 AS 通告路由时，只允许 AS300 本地始发的路由向外发布，过滤掉从其他外部 AS 学到的路由，避免这些外部路由经 AS300 再发布给另一个外部 AS，从而防止 AS300 成为 Transit AS。Core1 和 Core2 上的配置如下所示：
+
+```java{.line-numbers}
+bgp 300
+ router-id 10.255.0.2
+ peer 172.16.150.2 as-number 200 
+ #
+ ipv4-family unicast
+  peer 172.16.150.2 as-path-filter 10 export 
+#
+ip as-path-filter 10 permit ^$
+bgp 300
+ router-id 10.255.0.1
+ #
+ ipv4-family unicast
+  peer 172.16.100.2 as-path-filter 10 export 
+#
+ip as-path-filter 10 permit ^$
+```
+
+配置完成之后，Core1 和 Core2 向自己的 eBGP 对等体发布的路由如下所示，可以看到 Core1 和 Core2 学习到 **`200.200.200.0/24`** 和 **`100.100.100.0/24`**，但是 Core1 和 Core2 都没有向自己的 eBGP peer 进行宣告。但是 AS 300 内部的路由，比如 **`100.1.1.0/24`** 和 **`200.1.1.0/24`** 会向 AS100 和 AS200 进行宣告。
+
+```java{.line-numbers}
+<Core1>display bgp routing-table 
+ BGP Local router ID is 10.255.0.1 
+ Total Number of Routes: 13
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.11.1.0/24       10.255.0.11     0          100        0      i
+ * i                     10.255.0.11     0          100        0      i
+ *>i  10.21.1.0/24       10.255.0.21     0          100        0      i
+ *>i  10.22.1.0/24       10.255.0.22     0          100        0      i
+ *>i  100.1.1.0/24       10.255.0.12     0          100        100    i
+ * i                     10.255.0.13     0          100        0      i
+ * i                     10.255.0.12     0          100        0      i
+ *>   100.100.100.0/24   172.16.100.2                          0      100i
+ *>i  200.1.1.0          10.255.0.13     0          100        100    i
+ * i                     10.255.0.12     0          100        0      i
+ * i                     10.255.0.13     0          100        0      i
+ *>i  200.200.200.0      10.255.0.2                 100        0      200i
+ *                       172.16.100.2                          0      100 200i
+[Core2-bgp]display bgp routing-table peer 172.16.150.2 advertised-routes
+ BGP Local router ID is 10.255.0.2 
+ Total Number of Routes: 5
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.11.1.0/24       172.16.150.1                          0      300i
+ *>i  10.21.1.0/24       172.16.150.1                          0      300i
+ *>i  10.22.1.0/24       172.16.150.1                          0      300i
+ *>i  100.1.1.0/24       172.16.150.1                          100    300i
+ *>i  200.1.1.0          172.16.150.1                          100    300i
+
+<Core1>display bgp routing-table 
+ BGP Local router ID is 10.255.0.1 
+ Total Number of Routes: 13
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.11.1.0/24       10.255.0.11     0          100        0      i
+ * i                     10.255.0.11     0          100        0      i
+ *>i  10.21.1.0/24       10.255.0.21     0          100        0      i
+ *>i  10.22.1.0/24       10.255.0.22     0          100        0      i
+ *>i  100.1.1.0/24       10.255.0.12     0          100        100    i
+ * i                     10.255.0.13     0          100        0      i
+ * i                     10.255.0.12     0          100        0      i
+ *>   100.100.100.0/24   172.16.100.2                          0      100i
+ *>i  200.1.1.0          10.255.0.13     0          100        100    i
+ * i                     10.255.0.12     0          100        0      i
+ * i                     10.255.0.13     0          100        0      i
+ *>i  200.200.200.0      10.255.0.2                 100        0      200i
+ *                       172.16.100.2                          0      100 200i
+<Core1>display bgp routing-table peer 172.16.100.2 advertised-routes
+ Total Number of Routes: 5
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  10.11.1.0/24       172.16.100.1                          0      300i
+ *>i  10.21.1.0/24       172.16.100.1                          0      300i
+ *>i  10.22.1.0/24       172.16.100.1                          0      300i
+ *>i  100.1.1.0/24       172.16.100.1                          100    300i
+ *>i  200.1.1.0          172.16.100.1                          100    300i
+```
+
