@@ -375,7 +375,51 @@ Border Gateway Protocol - UPDATE Message
 [RR2-bgp]display bgp routing-table 203.0.113.0 // 结果为空
 ```
 
-## 6.BGP 反射器组网实验
+## 6.路由反射器的备份和部署
+
+### 6.1 备份反射器
+
+<div align="center">
+    <img src="bgp_static/15.png" width="450"/>
+</div>
+
+为增加网络的可靠性，避免单点故障，需要在一个集群中配置一个以上的 RR，同一集群中的所有 RR 必须使用相同的 **`Cluster_ID`**，如图 6-42 所示。路由反射器 RR 1 和 RR 2 在同一个集群内，配置了相同的 **`Cluster_ID`**。客户机 Client 1 和相同 **`Cluster_ID`** 的 RR 都建立 iBGP 邻居关系。当从 eBGP 对等体接收到一条路由时，Client 1 同时向 RR 1 和 RR 2 通告这条路由。
+
+RR 1 和 RR 2 在接收到该路由后，将本地 **`Cluster_ID`** 添加到 **`Cluster_List`** 前面，然后向其他的客户机（Client 2、Client 3）反射，同时相互反射。
+
+RR 1 和 RR 2 在接收到该反射路由后，检查 **`Cluster_List`**，发现自己的 **`Cluster_ID`** 已经包含在 **`Cluster_List`** 中，于是 RR 1 和 RR 2 丢弃该路由，从而避免了路由环路，同时能避免同集群内路由反射器间互相学习源自同一客户机的路由，可节省内存开销。
+
+**<font color="red">由于集群中 RR 间不互相学习 Client 的路由，所以如果 RR 上没有 eBGP 邻居关系，则 RR 间可以没有 iBGP 邻居关系</font>**。这里解释一下这句话，RFC 4456 对路由反射的定义重点在于：RR 将一条通过 iBGP 学到的路由再次通告给另一个 iBGP Peer，才属于反射行为，即 advertising an IBGP learned route to another IBGP peer。因此如果 RR1 再把从 Client1 学到的路由发送给 RR2，就属于真正的 Route Reflection。据此，RR1 从 eBGP 学到的路由再通过 iBGP 通告给 RR2，并不是把一条 iBGP 路由再次反射出去，Huawei 的 RR 规则也说明，RR 从 eBGP Peer 学到的路由可以正常发布给 Client 和 Non-Client。因此，即使 RR1、RR2 使用相同 Cluster-ID，RR2 仍可以学习 RR1 独有的 eBGP 路由。
+
+### 6.2 同级路由反射器
+
+如下图所示，一个骨干网被分成多个集群，各集群的 RR 之间互为非客户机关系，但是建立 iBGP 全连接。此时虽然每个客户机只与所在集群的 RR 建立 iBGP 连接，但所有 RR 和客户机都能收到全部路由信息。
+
+<div align="center">
+    <img src="bgp_static/18.png" width="650"/>
+</div>
+
+在上述同一个 AS 被划分为多个 Route Reflector Cluster 的场景中，每个 Cluster 通常由一台 RR 和若干 Client 组成。Client 只需要与本 Cluster 的 RR 建立 iBGP 会话。而位于不同 Cluster、处于同一层级的 RR，则相互作为 Non-Client iBGP Peer，华为将这种设计称为 Flat RR。
+
+例如，Cluster 1 中的 Client-A 向本 Cluster 的 RR1 通告路由 **`10.10.10.0/24`**。RR1 收到这条 iBGP 路由后，如果该路径成为 RR1 选择的最佳路径，由于该路由来自 Client Peer，因此 RR1 可以将其反射给本 Cluster 的其他 Client，以及其他所有 Non-Client Peer。因此，RR2、RR3、RR4 作为 RR1 的同级 Non-Client 邻居都可以收到这条路由。
+
+当 RR2 从 RR1 收到该路由时，由于 RR1 属于 Non-Client Peer，因此 RR2 只能把这条路由反射给自己的 Client，不能继续反射给其他 Non-Client RR。也就是说，RR2 可以将 **`10.10.10.0/24`** 下发给 Cluster 2 内的 Client，但不能再经由 RR2 转发给 RR3、RR4。正因如此，同级 RR 之间通常需要建立 iBGP Full Mesh，使源 Cluster 的 RR 能够直接把 Client 路由通告给其他所有同级 RR，再由各 RR 分别向本 Cluster 的 Client 进行反射。
+
+### 6.3 分层路由反射器
+
+如下图所示，一个 AS 中可以存在多个集群，各个集群的 RR 之间建立 iBGP 对等体。当 RR 所处的网络层不同时，可以将较低网络层次的 RR 配成客户机，形成分级 RR。每个路由反射器既可以作为该集群的反射器角色，也可以作为其他集群的客户机角色。
+
+<div align="center">
+    <img src="bgp_static/19.png" width="450"/>
+</div>
+
+在分级路由反射器架构中，假设 ISP 通过 eBGP 向一级反射器 RR1-A 通告路由 **`100.1.1.0/24`**，当该路由成为 RR1-A 的可用最佳路径后，RR1-A 可以将其正常通告给自己的 iBGP Peer，其中包括作为其 Client 的二级反射器 RR2。
+
+RR2 从 RR1-A 收到这条路由后，**<font color="red">对于 RR2 而言，RR1-A 并不是 RR2 的 Client，而是其上游普通 iBGP Peer，因此按 Non-Client 方向处理</font>**。从 Non-Client iBGP Peer 学到的最佳路由可以反射给所有 Client。于是 RR2 可以继续将 **`100.1.1.0/24`** 反射给 Cluster 2 中的各个 Client。
+
+反方向同样成立。假设 Cluster 2 中的 Client-A 向 RR2 通告路由 **`10.10.10.0/24`**，RR2 收到的是一条来自 Client 的 iBGP 路由。从 Client 学到的最佳路由，可以反射给其他 Client 以及 Non-Client。因此，RR2 不仅可以将该路由反射给 Cluster 2 中的其他 Client，还可以向自己的上游 Non-Client Peer（RR1-A 和 RR1-B）进行反射。当 RR1-A 收到 RR2 反射上来的路由时，从 RR1-A 的角度看，RR2 是自己的 Client。因此，RR1-A 又可以将其进一步反射给 Cluster 1 中的其他 Client 以及相应的 Non-Client Peer。
+
+## 7.BGP 反射器组网实验
 
 如下图所示，AS300 为某企业网络，要求为其设计一个内部网络有两个核心节点 Core1 和 Core2、三个分支节点，分别为 C1、C2、C3。C2 与 C3 双归属到一个网络，同时能接收该网络通告的两条相同路由 **`100.1.1.0/24`**、**`200.1.1.0/24`**，为满足新业务扩充，新加入了节点 B1 和 B2。
 
@@ -396,21 +440,21 @@ Border Gateway Protocol - UPDATE Message
     <img src="bgp_static/17.png" width="850"/>
 </div>
 
-### 6.1 组网需求
+### 7.1 组网需求
 
-#### 6.1.1 组网需求1
+#### 7.1.1 组网需求1
 
 由于分支节点之间不能直接交互路由信息，因此 C1、C2、C3 之间没有直接的物理连线，都与两台核心路由器相连（Core1 和 Core2），两台核心设备部署为路由反射器 RR，各分支部署为客户端 Client，这样就可以将各自分支之间的路由通过 RR 来反射。
 
-#### 6.1.2 组网需求2
+#### 7.1.2 组网需求2
 
 由于新加入的节点（B1 和 B2）之间不能学习各自路由，但是可以学习其他所有路由，那么将 B1 和 B2 作为非客户端，两台设备之间无任何物理连线，且只与 Core2 相连。B1、B2 均仅与 Core2 建立 iBGP 邻居，并在 Core2 上作为 RR 的 Non-Client。根据 BGP 路由反射规则，RR 从一个 Non-Client 学到的路由不会反射给另一个 Non-Client，因此 B1 与 B2 无法学习对方的业务路由。而来自 RR Client 及 eBGP 邻居的路由仍可正常发布给两者。
 
-#### 6.1.3 组网需求3
+#### 7.1.3 组网需求3
 
 将 C1、C2、C3 都双上连到 Core1 和 Core2，且都作为两个 RR 的客户端，实现网络的冗余性和可靠性。
 
-#### 6.1.4 组网需求4
+#### 7.1.4 组网需求4
 
 在该需求中，B1、B2 均作为 Core2 的 Non-Client iBGP Peer。为了让 B1、B2 既能够学习来自 AS100 的路由，又保持彼此之间不直接学习对方路由，**<font color="red">可以将 Core1 配置为 Core2 的 Client</font>**。需要注意，Core1 是 Core2 的 Client 并不意味着 Core2 同时也是 Core1 的 Client。
 
@@ -418,9 +462,9 @@ Border Gateway Protocol - UPDATE Message
 
 反方向同样成立。假设 B1 向 Core2 通告自己的网段 **`10.21.1.0/24`**。由于 B1 是 Core2 的 Non-Client，Core2 从 B1 学到的最佳 iBGP 路由只能反射给自己的 Client，而不能反射给另一个 Non-Client B2。这样正好保证 B1 和 B2 不互相学习路由。Core2 将 B1 的路由反射给 Core1，Core1 合法收到并选中这条 iBGP 路由后，根据华为文档，**<font color="red">从 iBGP 对等体收到的路由，BGP 设备只发布给它的 eBGP 对等体（水平分割）</font>**，因此 Core1 可以把它继续通告给自己的 eBGP Peer AS100。
 
-### 6.2 路由控制需求
+### 7.2 路由控制需求
 
-#### 6.2.1 路由控制需求1
+#### 7.2.1 路由控制需求1
 
 需求 1：在该拓扑中，C2 和 C3 都能够通告 **`100.1.1.0/24`** 和 **`200.1.1.0/24`** 两个网段，并且由于分别与 Core1、Core2 建立 BGP 邻居关系，因此，对于每一个目标网段，比如 **`100.1.1.0/24`** 实际上有 4 条路径，即 **`C2->Core1->C1`**、**`C2->Core2->C1`**、**`C3->Core1->C1`**、**`C3->Core2->C1`**，对于 **`200.1.1.0/24`** 也是同理。但是要求 C1 必须经过 C2 来访问 **`100.1.1.0`**，需要将 C2 通告 **`100.1.1.0`** 网段路径属性修改得比 C3 通告的更优。而通过 C3 访问 **`200.1.1.0`**，就需要将 C3 通告的 **`200.1.1.0`** 网段路径属性修改得比 C2 通告的更优。
 
@@ -515,7 +559,7 @@ not preferred for Cluster List
 
 Core1 同时获得了来自 C2、C3 以及 Core2 RR 的候选路径，其中直接来自 C2 的路径经过入方向策略后获得 PrefVal=100，最终显示为 best, select, active。因此可以确认 Core1 对 **`100.1.1.0/24`** 优先经 C2 转发的路由控制需求已经实现。
 
-#### 6.2.2 路由控制需求2
+#### 7.2.2 路由控制需求2
 
 默认情况下，默认不能通过出口策略修改反射路由的路径属性，目的是为了防止环路，因此需要通过配置命令 **`reflect change-path-attribute`** 来允许修改出口的策略。因此可以改为在 C1 上使用 **`route-policy`** 路由策略 **`apply ip-address next-hop <IPv4地址>`** 来强制修改下一跳，即采用核心节点先完成 C2/C3 的路径选择，C1 再根据业务前缀指定下一跳的方式实现。具体配置如下所示，该策略匹配 **`100.1.1.0/24`** 后将下一跳设置为 Core1 的 **`10.0.11.1`**，匹配 **`200.1.1.0/24`** 后将下一跳设置为 Core2 的 **`10.0.21.1`**。
 
@@ -607,7 +651,7 @@ Original nexthop: 10.0.21.1
 
 根据上述 tracert 结果，可以确认 **`200.1.1.0/24`** 的实际访问路径稳定为 **`C1->Core2->C3->200.1.1.0/24`**，**`C1->Core1->C2->100.1.1.0/24`**。
 
-#### 6.2.3 路由控制需求3
+#### 7.2.3 路由控制需求3
 
 为了防止 AS 300 成为外部 AS 100 与 AS 200 之间的穿越（Transit）AS，应在 AS 300 向外部 EBGP 邻居发布路由时进行出方向过滤，**<font color="red">只允许 AS 300 本地始发的路由向外通告，禁止将从一个外部 AS 学到的路由再通告给另一个外部 AS</font>**。可以使用 **`as-path-filter`** 实现。由于 AS 300 本地始发路由在本地 BGP 表中的 **`AS_PATH`** 为空，因此可以使用正则表达式 **`^$`** 匹配这类路由，并将其设置为 permit；其他从外部 AS 学到的路由，其 **`AS_PATH`** 非空，无法匹配 **`^$`**，因此被默认拒绝。最后，将该 **`AS-Path Filter`** 分别应用在 AS 300 面向 AS 100 和 AS 200 的 EBGP 邻居 export 方向，即可避免 AS 100 与 AS 200 通过 AS 300 进行中转，从而保证 AS 300 不成为穿越 AS。
 
