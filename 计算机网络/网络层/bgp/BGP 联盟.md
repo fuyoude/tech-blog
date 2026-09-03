@@ -555,3 +555,246 @@ Route-policy : ORIGIN_TEST_TO_R1
 
 随后 BGP 继续比较 Origin 属性，由于 IGP 优于 Incomplete，R1 最终选择了经 R3 学到的路径作为 Best Route。
 
+## 3.BGP 联盟案例研究
+
+我们以如下的案例对 BGP 联盟进行研究，如下图所示，AS 200 使用联盟来部署。内部划分 3 个子 AS，AS 号码分别为 65001、65002、65003。
+
+<div align="center">
+    <img src="bgp_static/21.png" width="850"/>
+</div>
+
+R1 和 R2、R6 和 R7 为 eBGP 邻居关系。R2、R3、R5 之间分别建立联盟 eBGP 邻居，R4 与 R6 为联盟 eBGP 邻居，R3 与 R4、R5 与 R6 分别为联盟 iBGP 邻居。在 AS 100 和 AS 300 中分别通告 **`100.1.1.0/24`** 网段。在联盟 **`AS 65002`** 中通告 **`100.1.2.0/24`** 网段。在联盟 **`AS 65003`** 中通告 **`172.16.1.0/24`**、**`172.16.2.0/24`** 网段。现在需要实现如下需求：
+
+- AS 65003 希望 AS 65002 访问 **`172.16.1.0/24`** 网络时优选 R5 进入，次选 R6 进入。访问 **`172.16.2.0/24`** 优选经 R6 进入。
+- 分别在 R4 和 R5 做路由聚合，观察一下该聚合路由在联盟中的路径，观察 R6 到聚合路由的选路。
+- 分析 R5 到达 **`100.1.1.0/24`** 网段选择哪条路径到达。
+
+### 3.1 需求 1 实现
+
+在 AS 65003 和 AS 65002 间使用 MED 来影响 AS 65002 的选路。希望通过 MED 策略实现 R3 优先通过 R5 访问 **`172.16.1.0/24`**，R4 优先通过 R6 访问 **`172.16.2.0/24`** 网络。
+
+通过之前的例子可以知道 MED 可以由 R5 设置，经过多个子 AS 传递，不修改。而且在子 AS 之间传递时，路由下一跳（如 **`10.1.5.5`**）也不会修改，所以联盟 eBGP 不同于联盟外的 eBGP 邻居关系，联盟 eBGP 上特性和 iBGP 相似，除了 **`AS_PATH`** 外。
+
+MED 在联盟内的应用的原则如下所示：
+
+- 如果路由源自联盟内部，则邻居子 AS 号一致，可以比较 MED；如果邻居子 AS 号不一致，则不比较 MED。
+- 如果路由源自联盟外部，其外部邻居 AS 一致的路由可以比较 MED 值；如果路由既有外部 AS 号，又有联盟子 AS 号，这样的路由仅考虑其外部 AS 来判定是否来自同一邻居。"()" 中部分在比较 MED 时，忽略不考虑。
+- 如果一定要在联盟内部子 AS 间选路（即使邻居子 AS 号不一致），希望使用 MED 比较时，可使用如下办法：**<font color="red">配置 **`bestroute med-confederation`** 命令，这样 BGP 在联盟内选择最优路由时就能够比较 MED 值</font>**。
+
+示例 1 如下所示，下述结果中，虽邻居子 AS 不同，但 BGP 默认忽略子 AS 号，所以两条路由可以比较 MED，优选路径 1。
+
+```java{.line-numbers}
+路径 1：100（65001） MED=10 IGP-COST 2
+路径 2：100（65002） MED=20 IGP-COST 1
+```
+
+示例 2 如下所示，默认情况下，MED 不比较，使用 IGP-COST 小的路由，所以优选路径 2。如果在 BGP 进程下，添加命令 **`bestpath med-confederation`** 后，则选路结果发生变化，MED 可以比较，所以当前最好的路由是路径 1。因此添加该命令后，MED 可以参与比较，但并不关心 "()" 里联盟子 AS 号是什么。
+
+```java{.line-numbers}
+路径 1：（65001 65002） MED=10 IGP-COST 2
+路径 2：（65001 65003） MED=20 IGP-COST 1
+```
+
+为了实现需求 1，R5 上配置的路由策略如下所示：
+
+```java{.line-numbers}
+[R5]display route-policy 
+Route-policy : med
+  permit : 10 (matched counts: 0)
+    Match clauses : 
+      if-match ip-prefix R172-1
+    Apply clauses : 
+      apply cost 10 
+  permit : 20 (matched counts: 0)
+    Match clauses : 
+      if-match ip-prefix R172-2
+    Apply clauses : 
+      apply cost 20 
+  permit : 30 (matched counts: 0)
+Route-policy : R2-med
+  permit : 10 (matched counts: 0)
+    Match clauses : 
+      if-match ip-prefix R172-1
+    Apply clauses : 
+      apply cost 15 
+  permit : 20 (matched counts: 0)
+    Match clauses : 
+      if-match ip-prefix R172-2
+    Apply clauses : 
+      apply cost 15 
+  permit : 30 (matched counts: 0)
+[R5]display this 
+#
+sysname R5
+#
+ip ip-prefix R172-1 index 10 permit 172.16.1.0 24
+ip ip-prefix R172-2 index 10 permit 172.16.2.0 24
+[R5-bgp]display this 
+#
+bgp 65003
+ router-id 10.1.5.5
+  peer 10.1.2.2 route-policy R2-med export
+  peer 10.1.3.3 route-policy med export
+```
+
+R6 上配置的策略如下所示：
+
+```java{.line-numbers}
+[R6]display route-policy 
+Route-policy : med
+  permit : 10 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix R172-1
+    Apply clauses : 
+      apply cost 20 
+  permit : 20 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix R172-2
+    Apply clauses : 
+      apply cost 10 
+  permit : 30 (matched counts: 1)
+[R6]display this 
+#
+sysname R6
+#
+ip ip-prefix R172-1 index 10 permit 172.16.1.0 24
+ip ip-prefix R172-2 index 10 permit 172.16.2.0 24
+[R6-bgp]display this 
+#
+bgp 65003
+ router-id 10.1.6.6
+  peer 10.1.4.4 route-policy med export
+```
+
+R3 针对 **`172.16.1.0/24`** 共收到 3 条 BGP 路由，分别经 **`R5->R2->R3、R5->R3、R6->R4->R3`** 到达，对应的 AS_PATH 为 **`(65001 65003)`**、**`(65003)`**、**`(65003)`**，MED 分别为 15、10、20。由于联盟内部传递路由时本实验中 **`NEXT_HOP`** 保持不变，因此前两条路径的 **`Original nexthop`** 均为 R5 的 **`10.1.5.5`**，第三条为 R6 的 **`10.1.6.6`**。其中 **`From`** 表示该路由从哪个 BGP 邻居学习，而 **`Original nexthop`** 表示路由携带的原始 BGP 下一跳，两者并不一定相同。
+
+R3 还需要通过 IGP 对 **`Original nexthop`** 进行递归解析。**`10.1.5.5/32`** 经 OSPF 解析到 **`10.1.35.5`**，IGP Cost 为 1，因此从 R2 和 R5 学到的两条路由均显示 **`Relay IP Nexthop: 10.1.35.5`**。**`10.1.6.6/32`** 的 IGP Cost 为 2，经 OSPF 解析到 **`Relay IP Nexthop: 10.1.34.4`**。这里的 **`Relay IP Nexthop`** 只是本地递归解析后的实际转发下一跳，并不代表 BGP 的 **`NEXT_HOP`** 属性被修改。
+
+在缺省 MED 选路阶段，来自 R5 和 R4 的两条候选路由的 AS_PATH 均为 **`(65003)`**：一条由 R5 直接通告给 R3，另一条最初由 R6 通告给 R4，再由 R4 通过 AS65002 内部 iBGP 传递给 R3。根据前面规则，如果路由源自联盟内部，则邻居子 AS 号一致，可以比较 MED，因此 R5 路径的 MED 为 10，而经 R4 学到的路径 MED 为 20，**`10 < 20`**，R5 路径更优。因此第三条路径的详细信息中明确显示 **`not preferred for MED`**。
+
+接下来比较经 R2 和直接经 R5 学到的两条路径。它们的 AS_PATH 分别为 **`(65001 65003)`** 和 **`(65003)`**，**<font color="red">缺省这两条纯联盟内部路径不会直接使用 MED 15 和 MED 10 进行横向比较</font>**。MED 无法决胜后，BGP 继续比较后续属性。两条路由的原始 **`NEXT_HOP`** 都是 **`10.1.5.5`**，因此递归后的下一跳均为 **`10.1.35.5`**，IGP Cost 也同为 1，最终继续比较 BGP Router ID。R2 的 Router ID 为 **`10.1.2.2`**，R5 的 Router ID 为 **`10.1.5.5`**，由于 **`10.1.2.2 < 10.1.5.5`**，经 R2 学到的路径最终被 R3 选为最优路由，而直接从 R5 学到的路径则显示 **`not preferred for router ID`**。
+
+因此，在**尚未配置 `bestroute med-confederation`** 时，R3 最终选择的是经 **R2** 学到的 **`172.16.1.0/24`** 路由，其 AS_PATH 为 **`(65001 65003)`**、MED 为 15。
+
+```java{.line-numbers}
+<R3>display bgp routing-table 
+
+ BGP Local router ID is 10.1.3.3 
+ Status codes: * - valid, > - best, d - damped,
+               h - history,  i - internal, s - suppressed, S - Stale
+               Origin : i - IGP, e - EGP, ? - incomplete
+
+ Total Number of Routes: 10
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+
+ *>i  100.1.1.0/24       10.1.67.7       0          100        0      (65003) 300i
+ * i                     10.1.67.7       0          100        0      (65003) 300i
+   i                     10.1.12.1       0          100        0      (65001) 100i
+ *>   100.1.2.0/24       0.0.0.0         0                     0      i
+ *>i  172.16.1.0/24      10.1.5.5        15         100        0      (65001 65003)i
+ * i                     10.1.5.5        10         100        0      (65003)i
+ * i                     10.1.6.6        20         100        0      (65003)i
+ *>i  172.16.2.0/24      10.1.5.5        15         100        0      (65001 65003)i
+ * i                     10.1.6.6        10         100        0      (65003)i
+ * i                     10.1.5.5        20         100        0      (65003)i
+<R3>display bgp routing-table 172.16.1.0
+
+ BGP local router ID : 10.1.3.3
+ Local AS number : 65002
+ Paths:   3 available, 1 best, 1 select
+
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.2.2 (10.1.2.2)
+ Route Duration: 00h42m45s  
+ Relay IP Nexthop: 10.1.35.5
+ Relay IP Out-Interface: GigabitEthernet0/0/2
+ Original nexthop: 10.1.5.5
+ Qos information : 0x0
+ AS-path (65001 65003), origin igp, MED 15, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
+ Advertised to such 3 peers:
+    10.1.2.2
+    10.1.5.5
+    10.1.4.4
+
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.5.5 (10.1.5.5)
+ Route Duration: 00h42m29s  
+ Relay IP Nexthop: 10.1.35.5
+ Relay IP Out-Interface: GigabitEthernet0/0/2
+ Original nexthop: 10.1.5.5
+ Qos information : 0x0
+ AS-path (65003), origin igp, MED 10, localpref 100, pref-val 0, valid, external-confed, pre 255, IGP cost 1, not preferred for router ID
+ Not advertised to any peer yet
+
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.4.4 (10.1.4.4)
+ Route Duration: 00h41m55s  
+ Relay IP Nexthop: 10.1.34.4
+ Relay IP Out-Interface: GigabitEthernet0/0/1
+ Original nexthop: 10.1.6.6
+ Qos information : 0x0
+ AS-path (65003), origin igp, MED 20, localpref 100, pref-val 0, valid, internal-confed, pre 255, IGP cost 2, not preferred for MED
+ Not advertised to any peer yet
+<R3>display ip routing-table 10.1.5.5
+Route Flags: R - relay, D - download to fib
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.5.5/32  OSPF    10   1           D   10.1.35.5       GigabitEthernet0/0/2
+<R3>display ip routing-table 10.1.6.6
+Route Flags: R - relay, D - download to fib
+Routing Table : Public
+Summary Count : 2
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.6.6/32  OSPF    10   2           D   10.1.34.4       GigabitEthernet0/0/1
+                    OSPF    10   2           D   10.1.35.5       GigabitEthernet0/0/2
+```
+
+在 R3 上配置 **`bestroute med-confederation`** 命令后：
+
+```java{.line-numbers}
+[R4-bgp]display bgp routing-table 172.16.1.0
+
+ BGP local router ID : 10.1.4.4
+ Local AS number : 65002
+ Paths:   2 available, 1 best, 1 select
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.6.6 (10.1.6.6)
+ Route Duration: 00h00m23s  
+ Relay IP Nexthop: 10.1.46.6
+ Relay IP Out-Interface: GigabitEthernet0/0/1
+ Original nexthop: 10.1.6.6
+ Qos information : 0x0
+ AS-path (65003), origin igp, MED 20, localpref 100, pref-val 0, valid, external
+-confed, best, select, active, pre 255, IGP cost 1
+ Advertised to such 1 peers:
+    10.1.3.3
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.3.3 (10.1.3.3)
+ Route Duration: 00h01m41s  
+ Relay IP Nexthop: 10.1.46.6
+ Relay IP Out-Interface: GigabitEthernet0/0/1
+ Original nexthop: 10.1.5.5
+ Qos information : 0x0
+ AS-path (65001 65003), origin igp, MED 15, localpref 100, pref-val 0, valid, in
+ternal-confed, pre 255, IGP cost 2, not preferred for IGP cost
+ Not advertised to any peer yet
+<R2>display bgp routing-table 172.16.1.0
+
+ BGP local router ID : 10.1.2.2
+ Local AS number : 65001
+ Paths:   1 available, 1 best, 1 select
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.5.5 (10.1.5.5)
+ Route Duration: 00h02m59s  
+ Relay IP Nexthop: 10.1.25.5
+ Relay IP Out-Interface: GigabitEthernet0/0/2
+ Original nexthop: 10.1.5.5
+ Qos information : 0x0
+ AS-path (65003), origin igp, MED 15, localpref 100, pref-val 0, valid, external
+-confed, best, select, active, pre 255, IGP cost 1
+ Advertised to such 3 peers:
+    10.1.12.1
+    10.1.3.3
+    10.1.5.5
+```
