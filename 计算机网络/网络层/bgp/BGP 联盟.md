@@ -705,34 +705,24 @@ R3 还需要通过 IGP 对 **`Original nexthop`** 进行递归解析。**`10.1.5
 
  BGP routing table entry information of 172.16.1.0/24:
  From: 10.1.2.2 (10.1.2.2)
- Route Duration: 00h42m45s  
  Relay IP Nexthop: 10.1.35.5
- Relay IP Out-Interface: GigabitEthernet0/0/2
  Original nexthop: 10.1.5.5
- Qos information : 0x0
  AS-path (65001 65003), origin igp, MED 15, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
  Advertised to such 3 peers:
     10.1.2.2
     10.1.5.5
     10.1.4.4
-
  BGP routing table entry information of 172.16.1.0/24:
- From: 10.1.5.5 (10.1.5.5)
- Route Duration: 00h42m29s  
+ From: 10.1.5.5 (10.1.5.5) 
  Relay IP Nexthop: 10.1.35.5
- Relay IP Out-Interface: GigabitEthernet0/0/2
  Original nexthop: 10.1.5.5
- Qos information : 0x0
  AS-path (65003), origin igp, MED 10, localpref 100, pref-val 0, valid, external-confed, pre 255, IGP cost 1, not preferred for router ID
  Not advertised to any peer yet
 
  BGP routing table entry information of 172.16.1.0/24:
  From: 10.1.4.4 (10.1.4.4)
- Route Duration: 00h41m55s  
  Relay IP Nexthop: 10.1.34.4
- Relay IP Out-Interface: GigabitEthernet0/0/1
  Original nexthop: 10.1.6.6
- Qos information : 0x0
  AS-path (65003), origin igp, MED 20, localpref 100, pref-val 0, valid, internal-confed, pre 255, IGP cost 2, not preferred for MED
  Not advertised to any peer yet
 <R3>display ip routing-table 10.1.5.5
@@ -750,51 +740,288 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
                     OSPF    10   2           D   10.1.35.5       GigabitEthernet0/0/2
 ```
 
-在 R3 上配置 **`bestroute med-confederation`** 命令后：
+在 R3 上配置 **`bestroute med-confederation`** 命令后，如下所示，可以看到去往 **`172.16.1.0/24`** 最佳路径已经变为直接从 R5 学到的 MED 10 路径（MED 最小）。
 
 ```java{.line-numbers}
-[R4-bgp]display bgp routing-table 172.16.1.0
+[R3-bgp]display bgp routing-table 
+ BGP Local router ID is 10.1.3.3 
+ Total Number of Routes: 8
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  100.1.1.0/24       10.1.67.7       0          100        0      (65003) 300i
+ * i                     10.1.67.7       0          100        0      (65003) 300i
+   i                     10.1.12.1       0          100        0      (65001) 100i
+ *>   100.1.2.0/24       0.0.0.0         0                     0      i
+ *>i  172.16.1.0/24      10.1.5.5        10         100        0      (65003)i
+ *>i  172.16.2.0/24      10.1.6.6        10         100        0      (65003)i
+ * i                     10.1.5.5        15         100        0      (65001 65003)i
+ * i                     10.1.5.5        20         100        0      (65003)i
+```
 
+从上面的路由表可以看出，在 R3 配置 **`bestroute med-confederation`** 之前，**`172.16.1.0/24`** 存在 3 条候选路径，分别为经 R2 的 **`(65001 65003)`**、直接经 R5 的 **`(65003)`** 和经 R4 的 **`(65003)`**，MED 分别为 15、10 和 20。配置 MED 选路命令之后，R3 可以对来自联盟内不同 Member-AS 的纯联盟内部路径比较 MED，因此直接从 R5 学到的 MED 10 路径成为最优路由。
+
+根据华为官方文档，当存在多条有效 BGP 路由时，缺省只向邻居通告最优路由。BGP Speaker 从 IBGP 获得的路由不向它的 IBGP 对等体发布。
+
+首先看 R4。配置前，R4 的最优路径来自 R6，为 **`(65003)`**、MED 20，经 R3 学到的路径为 **`(65001 65003)`**、MED 15，由于两条路径的联盟来源不同，MED 未直接决定优劣，最终经 R6 的路径凭借更小的 IGP Cost 成为最优。R3 配置命令并改选 R5 后，会把新的 **`(65003)`**、MED 10 路径通告给同属 AS65002 的 R4，此时 R4 上来自 R3 和 R6 的两条路径均为 **`(65003)`**，可以直接比较 MED，于是 MED 10 的 R3 路径成为最优，而 R6 的 MED 20 路径显示 **`not preferred for MED`**。
+
+**<font color="red">由于 BGP 默认只通告最佳路径，R4 不再把 R6 的非最优路径通告给 R3，而新的最佳路径本身又是从 R3 这个 iBGP 邻居学到的，也不会重新返回给 R3</font>**。因此，R3 原来经 **`R6->R4->R3`** 学到的 MED 20 路径消失。
+
+```java{.line-numbers}
+// 配置 bestroute med-confederation 之前
+[R4-bgp]display bgp routing-table 172.16.1.0
  BGP local router ID : 10.1.4.4
  Local AS number : 65002
  Paths:   2 available, 1 best, 1 select
  BGP routing table entry information of 172.16.1.0/24:
  From: 10.1.6.6 (10.1.6.6)
- Route Duration: 00h00m23s  
  Relay IP Nexthop: 10.1.46.6
- Relay IP Out-Interface: GigabitEthernet0/0/1
  Original nexthop: 10.1.6.6
- Qos information : 0x0
- AS-path (65003), origin igp, MED 20, localpref 100, pref-val 0, valid, external
--confed, best, select, active, pre 255, IGP cost 1
+ AS-path (65003), origin igp, MED 20, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
  Advertised to such 1 peers:
     10.1.3.3
  BGP routing table entry information of 172.16.1.0/24:
  From: 10.1.3.3 (10.1.3.3)
- Route Duration: 00h01m41s  
  Relay IP Nexthop: 10.1.46.6
- Relay IP Out-Interface: GigabitEthernet0/0/1
  Original nexthop: 10.1.5.5
- Qos information : 0x0
- AS-path (65001 65003), origin igp, MED 15, localpref 100, pref-val 0, valid, in
-ternal-confed, pre 255, IGP cost 2, not preferred for IGP cost
+ AS-path (65001 65003), origin igp, MED 15, localpref 100, pref-val 0, valid, internal-confed, pre 255, IGP cost 2, not preferred for IGP cost
  Not advertised to any peer yet
-<R2>display bgp routing-table 172.16.1.0
+// 配置 bestroute med-confederation 之后
+<R4>display bgp routing-table 172.16.1.0
+ BGP local router ID : 10.1.4.4
+ Local AS number : 65002
+ Paths:   2 available, 1 best, 1 select
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.3.3 (10.1.3.3)
+ Relay IP Nexthop: 10.1.46.6
+ Original nexthop: 10.1.5.5
+ AS-path (65003), origin igp, MED 10, localpref 100, pref-val 0, valid, internal-confed, best, select, active, pre 255, IGP cost 2
+ Advertised to such 1 peers:
+    10.1.6.6
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.6.6 (10.1.6.6)
+ Relay IP Nexthop: 10.1.46.6
+ Original nexthop: 10.1.6.6
+ AS-path (65003), origin igp, MED 20, localpref 100, pref-val 0, valid, external-confed, pre 255, IGP cost 1, not preferred for MED
+ Not advertised to any peer yet
+```
 
+再看 R2。R3 改选 R5 的 **`(65003)`**、MED 10 路径后，将其向 **`AS65001`** 的 R2 通告。R2 收到的路径为 **`(65002 65003)`**、MED 10。R2 此时还保留直接从 R5 学到的 **`(65003)`**、MED 15 路径。由于 R2 本身没有配置 **`bestroute med-confederation`**，这两条来自不同联盟子 AS 的路径不能直接比较 MED。两者的 **`NEXT_HOP`** 和 IGP Cost 又相同，最终继续比较 Router ID。R3 的 Router ID **`10.1.3.3`** 小于 R5 的 **`10.1.5.5`**，因此经 R3 的路径成为 R2 的 Best，直接来自 R5 的路径则显示 **`not preferred for router ID`**。
+
+R2 当前去往 **`172.16.1.0/24`** 路由的最佳路径来自 R3，因此不会再将其发送给 R3。并且其 **`AS_PATH`** 为 **`(65002 65003)`**，R2 将该路径跨 Member-AS 通告时，会再加入自身的 65001，形成 **`(65001 65002 65003)`**。即使该 UPDATE 被发送给 R3，R3 也会发现 **`AS_CONFED_SEQUENCE`** 中已经包含自己的 Member-AS 65002，从而拒绝。
+
+```java{.line-numbers}
+// 配置 bestroute med-confederation 之前
+<R2>display bgp routing-table 172.16.1.0
  BGP local router ID : 10.1.2.2
  Local AS number : 65001
  Paths:   1 available, 1 best, 1 select
  BGP routing table entry information of 172.16.1.0/24:
  From: 10.1.5.5 (10.1.5.5)
- Route Duration: 00h02m59s  
  Relay IP Nexthop: 10.1.25.5
- Relay IP Out-Interface: GigabitEthernet0/0/2
  Original nexthop: 10.1.5.5
- Qos information : 0x0
- AS-path (65003), origin igp, MED 15, localpref 100, pref-val 0, valid, external
--confed, best, select, active, pre 255, IGP cost 1
+ AS-path (65003), origin igp, MED 15, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
  Advertised to such 3 peers:
     10.1.12.1
     10.1.3.3
     10.1.5.5
+// 配置 bestroute med-confederation 之后
+<R2>display bgp routing-table 172.16.1.0
+ BGP local router ID : 10.1.2.2
+ Local AS number : 65001
+ Paths:   2 available, 1 best, 1 select
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.3.3 (10.1.3.3)
+ Relay IP Nexthop: 10.1.25.5
+ Original nexthop: 10.1.5.5
+ AS-path (65002 65003), origin igp, MED 10, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
+ Advertised to such 3 peers:
+    10.1.12.1
+    10.1.5.5
+    10.1.3.3
+ BGP routing table entry information of 172.16.1.0/24:
+ From: 10.1.5.5 (10.1.5.5)
+ Relay IP Nexthop: 10.1.25.5
+ Original nexthop: 10.1.5.5
+ AS-path (65003), origin igp, MED 15, localpref 100, pref-val 0, valid, external-confed, pre 255, IGP cost 1, not preferred for router ID
+ Not advertised to any peer yet
 ```
+
+### 3.2 需求 2 实现
+
+在需求 1 的基础上进行如下调整：首先取消 R3 上配置的 **`bestroute med-confederation`** 命令，然后在 R2 上分别针对邻居 **`10.1.3.3`** 和 **`10.1.5.5`** 配置 **`next-hop-local`**，最后在 R7 上撤销 **`network 100.1.1.0/24`** 的发布。
+
+```java{.line-numbers}
+[R2-bgp]peer 10.1.3.3 next-hop-local
+[R2-bgp]peer 10.1.5.5 next-hop-local
+```
+
+完成上述配置后，R5 的 BGP 路由表如下。对于 **`100.1.1.0/24`**，R5 共接收到 3 条路径，分别对应 **`R1->R2->R5`**、**`R1->R2->R3->R5`** 和 **`R1->R2->R3->R4->R6->R5`**。
+
+```java{.line-numbers}
+[R5-bgp]display bgp routing-table
+ BGP Local router ID is 10.1.5.5 
+ Total Number of Routes: 10
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  100.1.1.0/24       10.1.2.2        0          100        0      (65001) 100i
+ * i                     10.1.2.2        0          100        0      (65002 65001) 100i
+ * i                     10.1.2.2        0          100        0      (65002 65001) 100i
+ *>i  100.1.2.0/24       10.1.3.3        0          100        0      (65001 65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+```
+
+根据 RFC 5065, BGP specifies that the **`AS_PATH`** attribute is a well-known mandatory attribute that is composed of a sequence of AS path segments. Each AS path segment is represented by a triple **`<path segment type, path segment length, path segment value>`**. Path segment type 如下所示：
+
+- **`AS_SEQUENCE`**：Type 2 普通 AS 的有序路径，比如 100 200；
+- **`AS_SET`**：Type 1 普通 AS 的无序集合，比如 **`{100 200}`**；
+- **`AS_CONFED_SEQUENCE`**：Type 3 联盟 Member-AS 的有序路径 **`(65001 65002)`**；
+- **`AS_CONFED_SET`**：Type 4 联盟 Member-AS 的无序集合 **`[65001 65002]`**；
+
+在 R5 上配置聚合命令后，聚合前的明细路由分别为 **`100.1.1.0/24 (65001) 100`** 和 **`100.1.2.0/24 (65001 65002)`**，因此聚合后的路径为：有序部分保留 **`(65001)`**，无序部分作为 AS-SET 集合，**<font color="red">联盟内的无序 AS 集合用 **`[]`** 来表示，外部无序 AS 集合用 **`{}`** 来表示，所以路径为：`(65001) [65002] {100}`</font>**。
+
+在 BGP 路由聚合中，有序和无序并不是指 AS 号是否按照数值大小排列，而是聚合之后还能否保留这些 AS 的经过顺序。如果多条明细路由具有共同的 **`AS_PATH`** 前缀，并且这些 AS 的先后关系能够继续确定，那么这部分可以保留为 SEQUENCE。对于仅出现在部分明细路径中、无法构成所有明细路由共同有序路径的 AS，则只能以 SET 形式保留其成员信息。
+
+以本实验为例，R5 聚合前选中的两条明细路由分别为 **`100.1.1.0/24 (65001) 100`** 和 **`100.1.2.0/24 (65001 65002)`**。两条路径均以联盟子 **`AS 65001`** 作为共同的有序路径起点，因此聚合后仍可确定 65001 属于两条明细路由共有的有序路径信息。于是 65001 继续以 **`AS_CONFED_SEQUENCE`** 的形式保留，在设备上显示为 **`(65001)`**。
+
+但在 65001 之后，两条路径已经发生分叉：第一条路径包含普通外部 AS 100，第二条路径包含联盟子 AS 65002。第一条路径并未经过 65002，第二条路径也未经过 AS 100。因此，聚合后只能确定 65002 和 100 曾出现在参与聚合的明细路径中，却无法将二者继续表示为所有明细路由共同经过的有序路径，所以必须转换为 SET。
+
+因此，联盟子 AS 65002 被表示为 **`AS_CONFED_SET`**，即 **`[65002]`**；普通外部 AS 100 被表示为 **`AS_SET`**，即 **`{100}`**。最终聚合路由的 **`AS_PATH`** 为 **`(65001) [65002] {100}`**。
+
+```java{.line-numbers}
+[R5-bgp]aggregate 100.1.0.0 16 as-set detail-suppressed
+[R5-bgp]display bgp routing-table 
+ BGP Local router ID is 10.1.5.5 
+ Total Number of Routes: 11
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   100.1.0.0/16       127.0.0.1                             0      (65001) [65002] {100}i
+ s>i  100.1.1.0/24       10.1.2.2        0          100        0      (65001) 100i
+ * i                     10.1.2.2        0          100        0      (65002 65001) 100i
+ * i                     10.1.2.2        0          100        0      (65002 65001) 100i
+ s>i  100.1.2.0/24       10.1.3.3        0          100        0      (65001 65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+```
+
+**`aggregate 100.1.0.0 16 as-set detail-suppressed`** 命令中的 **`as-set`** 表示在聚合路由中不把明细路由原来的 **`AS_PATH`** 信息全部丢掉，而是把相关 AS 信息合并到聚合路由的 **`AS_PATH`** 中，以便继续利用 **`AS_PATH`** 做环路检测。
+
+```java{.line-numbers}
+[R5-bgp]aggregate 100.1.0.0 16
+[R5-bgp]display bgp routing-table 
+ BGP Local router ID is 10.1.5.5 
+ Total Number of Routes: 11
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   100.1.0.0/16       127.0.0.1                             0      i
+ *>i  100.1.1.0/24       10.1.2.2        0          100        0      (65001) 100i
+ * i                     10.1.2.2        0          100        0      (65002 65001) 100i
+ * i                     10.1.2.2        0          100        0      (65002 65001) 100i
+ *>i  100.1.2.0/24       10.1.3.3        0          100        0      (65001 65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+```
+
+**`detail-suppressed`** 表示抑制聚合路由所包含的所有明细路由，只发布聚合路由。如下所示，在未配置 **`detail-suppressed`** 时，R5 会将最佳的 **`100.1.1.0/24`** 明细路由继续通告给邻居 **`10.1.6.6`** 和 **`10.1.3.3`**。加入 **`detail-suppressed`** 后，该明细路由虽然仍保留在本地 BGP 路由表中，但会被标记为 suppressed，不再向任何 Peer 通告，设备仅对外发布相应的聚合路由。
+
+```java{.line-numbers}
+[R5-bgp]aggregate 100.1.0.0 16 as-set
+[R5-bgp]display bgp routing-table 100.1.1
+ BGP local router ID : 10.1.5.5
+ Local AS number : 65003
+ Paths:   3 available, 1 best, 1 select
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.2.2 (10.1.2.2)
+ AS-path (65001) 100, origin igp, MED 0, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
+ Advertised to such 2 peers:
+    10.1.6.6
+    10.1.3.3
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.3.3 (10.1.3.3)
+ Original nexthop: 10.1.2.2
+ AS-path (65002 65001) 100, origin igp, MED 0, localpref 100, pref-val 0, valid, external-confed, pre 255, IGP cost 1, not preferred for router ID
+ Not advertised to any peer yet
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.6.6 (10.1.6.6)
+ Original nexthop: 10.1.2.2
+ AS-path (65002 65001) 100, origin igp, MED 0, localpref 100, pref-val 0, valid, internal-confed, pre 255, IGP cost 1, not preferred for router ID
+ Not advertised to any peer yet
+[R5-bgp]aggregate 100.1.0.0 16 as-set detail-suppressed 
+[R5-bgp]displ	
+[R5-bgp]display bg	
+[R5-bgp]display bgp ro	
+[R5-bgp]display bgp routing-table 100.
+ BGP local router ID : 10.1.5.5
+ Local AS number : 65003
+ Paths:   3 available, 1 best, 1 select
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.2.2 (10.1.2.2)
+ AS-path (65001) 100, origin igp, MED 0, suppressed, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
+ Not advertised to any peer yet
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.3.3 (10.1.3.3)
+ AS-path (65002 65001) 100, origin igp, MED 0, localpref 100, pref-val 0, valid, external-confed, pre 255, IGP cost 1, not preferred for router ID
+ Not advertised to any peer yet
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.6.6 (10.1.6.6)
+ AS-path (65002 65001) 100, origin igp, MED 0, localpref 100, pref-val 0, valid, internal-confed, pre 255, IGP cost 1, not preferred for router ID
+ Not advertised to any peer yet
+```
+
+接下来在 R4 上进行路由聚合，聚合前路由路径分别为 **`100.1.1.0/24 (65001) 100`** 和 **`100.1.2.0/24`**，由于两条路径 AS 号都是无序的，因此聚合后的路径为 **`[65001] {100}`**。
+
+```java{.line-numbers}
+[R4-bgp]aggregate 100.1.0.0 16 as-set detail-suppressed 
+[R4-bgp]display bgp routing-table 
+ BGP Local router ID is 10.1.4.4
+ Total Number of Routes: 7
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   100.1.0.0/16       127.0.0.1                             0      [65001] {100}i
+ s>i  100.1.1.0/24       10.1.2.2        0          100        0      (65001) 100i
+ s>i  100.1.2.0/24       10.1.3.3        0          100        0      i
+ *>i  172.16.1.0/24      10.1.5.5        10         100        0      (65003)i
+ * i                     10.1.6.6        20         100        0      (65003)i
+ *>i  172.16.2.0/24      10.1.6.6        10         100        0      (65003)i
+ * i                     10.1.5.5        15         100        0      (65001 65003)i
+```
+
+### 3.3 需求 3 实现
+
+接下来在 R4 和 R5 上取消聚合命令，并且在 R7 上重新发布 **`100.1.1.0/24`** 前缀路由。查看 R5 的 BGP 路由表，如下所示。R5 分别从 R2、R3、R6 收到 **`100.1.1.0/24`** 路由，由 R2 和 R3 传递的路由路径分别为 **`(65001) 100`**、**`(65002 65001) 100`**，且拥有同样的下一跳 **`10.1.2.2`**（联盟 AS 之间不会修改下一跳），由 R6 传递来的路由路径为 300，下一跳为 **`10.1.67.7`**。
+
+R5 将三条路径进行比较，由于 R2 与 R3 联盟中的路径不一样，**<font color="red">但是在进行 BGP 最优路由的 **`AS_PATH`** 长度比较时，`AS_CONFED_SEQUENCE` 和 `AS_CONFED_SET` 中的联盟 Member-AS 不计入 AS_PATH 长度</font>**，因此可以视为相等。其他属性都一致，最终比较 **`Router_ID`**，R2（**`10.1.2.2`**）要优于 R3（**`10.1.3.3`**），因此 R2 要优于 R3。再将 R2 与 R6 进行比较，由于 R2 的下一跳 IGP 的 cost 值（1）要优于 R6 下一跳的 IGP 的 cost 值（2）。因此 R2 也获胜，最终 R2 作为到达该网段的下一跳。
+
+```java{.line-numbers}
+[R5-bgp]display bgp routing-table 
+ BGP Local router ID is 10.1.5.5 
+ Total Number of Routes: 10
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  100.1.1.0/24       10.1.2.2        0          100        0      (65001) 100i
+ * i                     10.1.2.2        0          100        0      (65002 65001) 100i
+ * i                     10.1.67.7       0          100        0      300i
+ *>i  100.1.2.0/24       10.1.3.3        0          100        0      (65001 65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+ * i                     10.1.3.3        0          100        0      (65002)i
+[R5-bgp]display bgp routing-table 100.1.1.0
+ BGP local router ID : 10.1.5.5
+ Local AS number : 65003
+ Paths:   3 available, 1 best, 1 select
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.2.2 (10.1.2.2)
+ Relay IP Nexthop: 10.1.25.2
+ Original nexthop: 10.1.2.2
+ AS-path (65001) 100, origin igp, MED 0, localpref 100, pref-val 0, valid, external-confed, best, select, active, pre 255, IGP cost 1
+ Advertised to such 2 peers:
+    10.1.6.6
+    10.1.3.3
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.3.3 (10.1.3.3)
+ Relay IP Nexthop: 10.1.25.2
+ Original nexthop: 10.1.2.2
+ AS-path (65002 65001) 100, origin igp, MED 0, localpref 100, pref-val 0, valid, external-confed, pre 255, IGP cost 1, not preferred for router ID
+ Not advertised to any peer yet
+
+ BGP routing table entry information of 100.1.1.0/24:
+ From: 10.1.6.6 (10.1.6.6)
+ Relay IP Nexthop: 10.1.56.6
+ Original nexthop: 10.1.67.7
+ AS-path 300, origin igp, MED 0, localpref 100, pref-val 0, valid, internal-confed, pre 255, IGP cost 2, not preferred for IGP cost
+ Not advertised to any peer yet
+```
+
