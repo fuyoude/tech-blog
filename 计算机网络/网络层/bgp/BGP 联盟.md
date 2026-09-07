@@ -11,7 +11,7 @@
 1. 在联盟内部将会保留联盟外部的 **`next_hop`** 属性；
 2. 通告给联盟内的路由的 MED 属性在整个联盟范围内保留；
 3. Local Preference 属性在整个联盟范围内保留，而不只是在通告的成员 AS 内；
-4. 在联盟内将成员的 AS 号加入 **`AS_PATH`** 中，但不会将联盟内的 AS 号通告到联盟之外。在联盟中，**`AS_PATH`** 属性又添加了两种类型 **`AS-CONFED-SEQUENCE`**、**`AS-CONFED-SET`**，默认联盟将成员的 AS 号以 **`AS-CONFED-SEQUENCE`** 的形式在 **`AS_PATH`** 当中列出，如果在联盟内配置了聚合，AS 号将以 **`AS-CONFED-SET`** 形式列出；
+4. 在联盟内将成员的 AS 号加入 **`AS_PATH`** 中，但不会将联盟内的 AS 号通告到联盟之外。在联盟中，**`AS_PATH`** 属性又添加了两种类型 **`AS-CONFED-SEQUENCE`**、**`AS-CONFED-SET`**，默认联盟将成员的 AS 号以 **`AS-CONFED-SEQUENCE`** 的形式在 **`AS_PATH`** 当中列出，**<font color="red">如果在联盟内配置了聚合，AS 号将以 **`AS-CONFED-SET`** 形式列出</font>**；
 5. **`AS_PATH`** 中的联盟 AS 号用于避免环路，但是在联盟选择最短的 **`AS_PATH`** 路径时不会比较联盟 AS 号；
 6. 联盟内相关的属性传出联盟时将会被自动删除，无需过滤子 AS 号等信息操作。
 
