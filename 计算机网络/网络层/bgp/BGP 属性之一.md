@@ -255,3 +255,154 @@ MED 属性可以手动配置，如果路由没有配置 MED 属性，BGP 选路�
 
 >路由器默认只对相同的 AS 传递过来的路由进行 MED 的比较，不会比较不同 AS 传递的路由，可以使用命令 **`compare-different-as-med`** 来使其比较不同 AS 传递的路由。
 
+## 6.Community 属性
+
+### 6.1 属性介绍
+
+BGP Community（团体属性）本质上是一种给 BGP 路由打标签的机制，用于对路由进行分类，并结合路由策略实现过滤、属性修改和传播控制。BGP Community 是可选传递属性，一条路由可以同时携带多个 Community，BGP 设备可以根据这些标签决定是否接受或继续发布某条路由。**<font color="red">Community 本身通常不直接参与普通 BGP 选路比较，而是作为 Route-Policy 等策略的匹配条件</font>**。
+
+Community 常见的类型有 Standard Community、Extended Community 和 Large Community。Standard Community 每个值为 32 bit，工程中通常写成 **`AA:NN`**，例如 **`64511:200`**；这种写法通常把高 16 bit 作为 ASN，低 16 bit 作为运营者自定义值。
+
+Standard Community 可以理解为两类：
+
+- 具有统一协议语义的 Well-known Community；
+  - **`no-advertise (0xFFFFFF02)`**：限制最严格，携带该值的路由不能再发布给任何其他 BGP Peer；
+  - **`no-export (0xFFFFFF01)`**：对于普通的 AS，表示路由不能越过整个 AS 的边界，对于 BGP Confederation，仍然可以跨不同 Member-AS 传播；
+  - **`no-export-subconfed (0xFFFFFF03)`**：在 Confederation 中既不能传播给其他 Member-AS，也不能传播到 Confederation 外部，只能留在当前 Member-AS 内；
+  - **`internet (0x00000000)`**：表示不通过 Community 对路由的正常传播范围增加额外限制，匹配的路由可以发送给所有 Peer，并且缺省情况下路由属于 internet；
+- 运营者自定义的 Private Community，手工设置 community 值，格式为 **`AA:NN`**，类似 **`100:1`**、**`64511:200`**，这些含义完全由网络运营者自行约定，比如规定 64511 为上海路局 AS 号，200 为动环业务 vlanid。
+
+### 6.2 实验验证
+
+我们使用如下拓扑图来验证 Standard Community 中几种常见的 Well-known Community，并同时验证自定义 Standard Community 的匹配与过滤效果。
+
+<div align="center">
+    <img src="bgp_static/27.png" width="750"/>
+</div>
+
+在 R1 上始发 5 个前缀路由，分别为 **`100.1.11.1/32`**、**`100.1.12.1/32`**、**`100.1.13.1/32`**、**`100.1.14.1/32`** 和 **`100.1.15.1/32`**。路由到达 R2 后，通过 Route-Policy 为不同前缀设置不同的 Community 属性：将 **`100.1.11.1/32`** 设置为自定义 Standard Community 100:1；将 **`100.1.12.1/32`** 设置为 no-advertise；将 **`100.1.13.1/32`** 设置为 no-export-subconfed；将 **`100.1.14.1/32`** 设置为 no-export；将 **`100.1.15.1/32`** 设置为 internet。
+
+需要注意，**<font color="red">如果希望 Community 属性随 BGP Update 继续传递给后续 Peer，还需要在相应邻居上启用 `advertise-community`</font>**，默认情况下设备不会向 Peer 发布 Community 属性。
+
+```java{.line-numbers}
+<R2>display route-policy 
+Route-policy : R2-COMM
+  permit : 10 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix LB1
+    Apply clauses : 
+      apply community 100:1
+  permit : 20 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix LB2
+    Apply clauses : 
+      apply community no-advertise
+  permit : 30 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix LB3
+    Apply clauses : 
+      apply community no-export-subconfed
+  permit : 40 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix LB4
+    Apply clauses : 
+      apply community no-export
+  permit : 50 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix LB5
+    Apply clauses : 
+      apply community internet
+  permit : 100 (matched counts: 0)
+[R2]display this 
+#
+ip ip-prefix LB1 index 10 permit 100.1.11.1 32
+ip ip-prefix LB2 index 10 permit 100.1.12.1 32
+ip ip-prefix LB3 index 10 permit 100.1.13.1 32
+ip ip-prefix LB4 index 10 permit 100.1.14.1 32
+ip ip-prefix LB5 index 10 permit 100.1.15.1 32
+```
+
+配置完成之后，在 R2 上查看 BGP 路由的 Community 属性，可以看到 5 条测试路由均已按照 Route-Policy 设置了对应的 Community 值。
+
+```java{.line-numbers}
+[R2]display bgp routing-table community
+ BGP Local router ID is 2.2.2.2 
+ Total Number of Routes: 5
+      Network            NextHop        MED        LocPrf    PrefVal Community
+ *>   100.1.11.1/32      12.1.1.1        0                     0      <100:1>
+ *>   100.1.12.1/32      12.1.1.1        0                     0      no-advertise
+ *>   100.1.13.1/32      12.1.1.1        0                     0      no-export-subconfed
+ *>   100.1.14.1/32      12.1.1.1        0                     0      no-export
+ *>   100.1.15.1/32      12.1.1.1        0                     0      internet
+```
+
+在 R3 上查看 BGP 路由的 Community 属性，可以发现 **`100.1.12.1/32`** 已经不存在。这是因为该路由携带 **`no-advertise`** Community，表示该路由不能再通告给任何其他 BGP Peer。因此，该路由可以存在于 R2 的 BGP 表中，但不会继续发布给 R3。
+
+```java{.line-numbers}
+<R3>display bgp routing-table community
+ BGP Local router ID is 3.3.3.3 
+
+ Total Number of Routes: 4
+      Network            NextHop        MED        LocPrf    PrefVal Community
+ *>i  100.1.11.1/32      23.1.1.2        0          100        0      <100:1>
+ *>i  100.1.13.1/32      23.1.1.2        0          100        0      no-export-subconfed
+ *>i  100.1.14.1/32      23.1.1.2        0          100        0      no-export
+ *>i  100.1.15.1/32      23.1.1.2        0          100        0      internet
+```
+
+在另一个 **`Confederation Member-AS 65002`** 中的 R4 上查看，可以发现 **`100.1.13.1/32`** 已经不存在。这是因为该路由携带 **`no-export-subconfed`** Community，只允许在当前 Member-AS 内传播，不能通告给其他 Member-AS。因此，该路由可以到达 R3，但不能从 AS65001 继续传播到 AS65002。
+
+```java{.line-numbers}
+<R4>display bgp routing-table community
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 3
+      Network            NextHop        MED        LocPrf    PrefVal Community
+ *>i  100.1.11.1/32      23.1.1.2        0          100        0      <100:1>
+ *>i  100.1.14.1/32      23.1.1.2        0          100        0      no-export
+ *>i  100.1.15.1/32      23.1.1.2        0          100        0      internet
+```
+
+在 Confederation 外部的 R5 上查看，可以发现 **`100.1.14.1/32`** 已经不存在。这是因为该路由携带 **`no-export`** Community。no-export 允许路由在 Confederation 内不同 Member-AS 之间传播，但不能越过整个 Confederation 边界。因此，**`100.1.14.1/32`** 可以到达 R4，但不能继续发布给外部的 R5。
+
+```java{.line-numbers}
+<R5>display bgp routing-table community
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Community
+ *>   100.1.11.1/32      45.1.1.4                              0      <100:1>
+ *>   100.1.15.1/32      45.1.1.4                              0      internet
+```
+
+接下来，在 R5 上配置入方向 Route-Policy，根据 **`100.1.11.1/32`** 携带的 **`100:1`** Community 对其进行过滤。首先使用 **`ip community-filter 1 permit 100:1`** 匹配该 Community，再通过 R5-IN 的 deny 节点拒绝匹配的路由，后续 permit 节点允许其他路由通过。将 R5-IN 以 import 方向应用到对应的 BGP Peer 后，再次查看 R5 的 BGP 路由表，可以发现只剩 **`100.1.15.1/32`** 了。
+
+```java{.line-numbers}
+[R5]display this 
+#
+ip community-filter 1 permit 100:1
+[R5]display route-policy 
+Route-policy : R5-IN
+  deny : 10 (matched counts: 0)
+    Match clauses : 
+      if-match community-filter 1
+  permit : 20 (matched counts: 0)
+[R5-bgp]display bgp routing-table community
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 1
+      Network            NextHop        MED        LocPrf    PrefVal Community
+ *>   100.1.15.1/32      45.1.1.4                              0      internet
+```
+
+## 7.PrefVal 属性
+
+PrefVal 是 Preferred-Value 的简写，区别于前面介绍的其他属性，首选权值是华为设备内部分配给路由的权值，它并不是在路由更新中可传递的 BGP 标准属性。
+
+**<font color="red">任何出现在华为 BGP 表中的路由都会被分配 PrefVal，它只在一台路由器内部使用，不会传递给其他的路由器</font>**，这个值为 **`0～65535`** 范围的一个数，值越大越优先，缺省情况下所有路由的首选权值为 0。可以为独立的路由或从一个特定的邻居学习到的路由设置该值，用来影响路由器的选路。该属性在本地有意义，作用效果也仅影响本路由器的选路，无法影响其他路由器的选路。
+
+## 8.Aggregator 和 Atomic Aggregate
+
+**`Atomic-Aggregate`** 属性：属于公认任意属性，主要用于路由聚合时，如果聚合路由将所有明细路由抑制了，就会为聚合路由生成该属性。**<font color="red">使用该属性也有一种警告作用，用于告知对等体，原始的明细路由 **`AS_PATH`** 出现了丢失</font>**。根据 RFC 4271，If an aggregate excludes at least some of the AS numbers present in the AS_PATH of the routes that are aggregated as a result of dropping the **`AS_SET`**, the aggregated route, when advertised to the peer, SHOULD include the **`ATOMIC_AGGREGATE`** attribute.
+
+>**`detail-suppressed`** 用于抑制明细路由的发布，只向外发布聚合路由；
+>**`as-set`** 则用于在聚合时尽量保留参与聚合的明细路由 **`AS_PATH`** 信息，把无法继续保持明确顺序的 AS 以 **`AS_SET`** 的形式保留下来，从而增强聚合路由的路径信息和防环能力；
+
+Aggregator 属性：属于可选过渡属性，该属性作为 **`Atomic-Aggregate`** 的补充，指明路由信息是在何处出现了丢失，该属性包含发起聚合路由的 AS 号及生成聚合路由的 BGP 通告者的 RouterID（又称为 Aggregator ID）。
