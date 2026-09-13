@@ -366,3 +366,208 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
                     IBGP    255  0          RD   10.1.4.4        GigabitEthernet0/0/1
 ```
 
+## 4. BGP 路由和默认路由
+
+### 4.1 BGP 路由的注入
+
+#### 4.1.1 network 命令注入 IGP 路由
+
+BGP 协议自身是不能发现路由的，**<font color="red">最常见的方式是通过 network 来注入，将 IP 路由表中存在的路由注入进 BGP</font>**，注入路由时要注意该路由的前缀和掩码要与路由表中完全一致，否则注入不成功。通过 network 注入的路由，origin 属性为 igp。
+
+#### 4.1.2 import-route 命令注入 IGP 路由
+
+该方式可以将 IGP 的路由引入进 BGP，也可以引入直连、静态路由。但是缺省路由不能引入进 BGP。通过将外部路由引入进 BGP 的路由，origin 属性为 incomplete。
+
+#### 4.1.3 通过 aggregate 命令注入聚合路由
+
+```java{.line-numbers}
+aggregate ipv4-address {mask|mask-length} [as-set|attribute-policy route-policy-name1|detail-suppressed|origin-policy route-policy-name2|suppress-policy route-policy-name3]
+```
+
+路由聚合分为手动聚合和自动聚合，aggregate 命令用于手动聚合，手动聚合用于将 BGP 的路由进行聚合，如果聚合路由中所包含的明细路由的 origin 属性各不相同，那么聚合路由的 origin 属性按照优先级 **`incomplete>egp>igp`**，且聚合路由会继承原明细路由中的所有团体属性。If at least one route among routes that are aggregated has ORIGIN with the value INCOMPLETE, then the aggregated route MUST have the ORIGIN attribute with the value INCOMPLETE. Otherwise, if at least one route among routes that are aggregated has ORIGIN with the value EGP, then the aggregated route MUST have the ORIGIN attribute with the value EGP. In all other cases, the value of the ORIGIN attribute of the aggregated route is IGP.
+
+### 4.2 BGP 路由聚合
+
+路由聚合对于路由协议来说非常重要，尤其是像 BGP 这种大型的路由协议，在当前的互联网有着相当庞大的路由条目，如果不进行路由聚合，路由条目将会更多，并且一旦网络震荡，也会带来极大的影响。BGP 路由聚合分为手动聚合和自动聚合两种，aggregate 命令实现手动聚合。该命令可以对 BGP 本地路由表中的路由进行聚合。**<font color="red">手动聚合后的路由优先级高于自动聚合</font>**。
+
+#### 4.2.1 自动聚合
+
+BGP 的自动聚合是针对外部引进的路由进行有类的聚合，**<font color="red">不能对 network 方式注入的路由进行自动聚合</font>**。在 BGP 进程中使用命令 **`summary automatic`** 命令实现。缺省情况下，自动聚合未启用。例如将外部引入的路由 **`172.16.1.0/24`**、**`172.16.2.0/24`**、**`172.16.3.0/24`** 进行自动聚合，配置 **`summary automatic`** 后，路由被聚合为 B 类的地址 **`172.16.0.0/16`**。并且只向对等体发布聚合路由，减少路由发布的数量。**<font color="red">自动聚合必须在引入路由的设备上操作，其他设备配置自动聚合命令不生效</font>**。
+
+>BGP 的 summary automatic 自动聚合，只针对本设备通过 import-route 命令从 Direct、Static、RIP、OSPF、IS-IS 等路由来源引入 BGP 的路由，不针对 network 命令注入的路由，也不针对从 EBGP 或 IBGP Peer 通过 BGP UPDATE 学习到的路由。
+
+#### 4.2.2 手动聚合
+
+通过 aggregate 命令进行手动聚合，手动聚合可以针对外部引入的路由和通过 network 方式通告的路由实现。手动聚合比自动聚合路由具有更高的优先级，并且在任何地方都可以实现，即使明细路由不是来自于本 AS，因此部署比较灵活。
+
+如下图所示，R2 和 R4 之间建立 iBGP 连接，AS 100 通告了三条网段 **`172.16.1.0/24`**、**`172.16.2.0/24`**、**`172.16.3.0/24`**。为了减少其他 AS 的路由条目数量，需要对路由做聚合。
+
+<div align="center">
+    <img src="bgp_static/30.png" width="750"/>
+</div>
+
+在 R2 的 BGP 进程中配置手动聚合：
+
+```java{.line-numbers}
+[R2]bgp 200
+[R2-bgp]aggregate 172.16.0.0 16
+<R5>display bgp routing-table 
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 4
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   172.16.0.0         10.1.45.4                             0      200i
+ *>   172.16.1.0/24      10.1.45.4                             0      200 100i
+ *>   172.16.2.0/24      10.1.45.4                             0      200 100i
+ *>   172.16.3.0/24      10.1.45.4                             0      200 100i
+<R5>display bgp routing-table 172.16.0.0
+ BGP local router ID : 5.5.5.5
+ Local AS number : 300
+ Paths:   1 available, 1 best, 1 select
+ BGP routing table entry information of 172.16.0.0/16:
+ From: 10.1.45.4 (4.4.4.4)
+ Route Duration: 00h00m10s  
+ Direct Out-interface: GigabitEthernet0/0/0
+ Original nexthop: 10.1.45.4
+ AS-path 200, origin igp, pref-val 0, valid, external, best, select, active, pre 255
+ Aggregator: AS 200, Aggregator ID 2.2.2.2
+ Not advertised to any peer yet
+```
+
+根据 R5 的路由表可知，默认情况下，BGP 会将所有聚合后的路由及明细路由全部通告，聚合路由时可以通过添加关键字来过滤掉明细路由。detail-suppressed 可以用来过滤明细路由，如不携带则通告所有路由。配置聚合路由时添加关键字 **`detail-suppressed`** 来抑制明细路由。
+
+在 R2 上配置了 detail-suppressed 之后，R5 的路由表上只有聚合路由，明细路由已被抑制。
+
+```java{.line-numbers}
+[R2-bgp]aggregate 172.16.0.0 16 detail-suppressed
+<R5>display bgp routing-table
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 1
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   172.16.0.0         10.1.45.4                             0      200i
+<R5>display bgp routing-table 172.16.0.0
+ BGP local router ID : 5.5.5.5
+ Local AS number : 300
+ Paths:   1 available, 1 best, 1 select
+ BGP routing table entry information of 172.16.0.0/16:
+ From: 10.1.45.4 (4.4.4.4)
+ Route Duration: 00h00m05s  
+ Direct Out-interface: GigabitEthernet0/0/0
+ Original nexthop: 10.1.45.4
+ AS-path 200, origin igp, pref-val 0, valid, external, best, select, active, pre 255
+ Aggregator: AS 200, Aggregator ID 2.2.2.2, Atomic-aggregate
+ Not advertised to any peer yet
+```
+
+BGP 在做聚合时，聚合后的路由一定会携带 aggregator 属性。而 atomic-aggregate 属性仅当聚合路由抑制了所有明细路由以后才会出现在聚合路由上，用以表明聚合时有成员路由信息的丢失。原始的明细路由来自于 AS 100，但是该聚合路由只能看到 **`AS_PATH`** 为 200。aggregator 属性记录该聚合路由是在哪个 AS 及 AS 中的哪台路由器上产生的。上面的输出记录了该聚合是在 AS 200 中 BGP Router ID 为 **`2.2.2.2`** 的路由器上产生。
+
+suppress-policy 用于抑制指定的路由通告，可以用 route-policy 的 if-match 语句有选择地抑制一些具体路由，即匹配该策略的路由将被抑制，但其他未通过策略的具体路由仍被通告。
+
+origin-policy 为有条件的聚合，仅仅在匹配 route-policy 时才生成聚合路由。配置有条件产生聚合路由，且抑制明细路由。本例中通过前缀列表匹配到 **`172.16.4.0/24`** 网段，如果路由表中存在则生成聚合路由。因此 R2 中没有这个明细路由，因此不匹配 origin-policy，所以不生成聚合路由，在 R5 的路由表中只有明细路由。
+
+```java{.line-numbers}
+[R2-bgp]display route-policy 
+Route-policy : ORIGIN
+  permit : 10 (matched counts: 0)
+    Match clauses : 
+      if-match ip-prefix ROUTE
+[R2]ip ip-prefix ROUTE permit 172.16.4.0 24
+[R2-bgp]aggregate 172.16.0.0 16 origin-policy ORIGIN detail-suppressed 
+<R5>display bgp routing-table
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 3
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   172.16.1.0/24      10.1.45.4                             0      200 100i
+ *>   172.16.2.0/24      10.1.45.4                             0      200 100i
+ *>   172.16.3.0/24      10.1.45.4                             0      200 100i
+```
+
+attribute-policy 用来设置聚合路由的属性，下面使用 attribute-policy 将聚合路由 origin 属性改为 incomplete。
+
+```java{.line-numbers}
+[R2]display route-policy 
+Route-policy : ATTRIBUTE
+  permit : 10 (matched counts: 1)
+    Apply clauses : 
+      apply origin incomplete 
+[R2-bgp]aggregate 172.16.0.0 16 detail-suppressed attribute-policy ATTRIBUTE
+<R5>display bgp routing-table 172.16.0.0
+
+ BGP local router ID : 5.5.5.5
+ Local AS number : 300
+ Paths:   1 available, 1 best, 1 select
+ BGP routing table entry information of 172.16.0.0/16:
+ From: 10.1.45.4 (4.4.4.4)
+ Route Duration: 00h00m05s  
+ Direct Out-interface: GigabitEthernet0/0/0
+ Original nexthop: 10.1.45.4
+ Qos information : 0x0
+ AS-path 200, origin incomplete, pref-val 0, valid, external, best, select, active, pre 255
+ Aggregator: AS 200, Aggregator ID 2.2.2.2, Atomic-aggregate
+ Not advertised to any peer yet
+```
+
+as-set 聚合路由会丢失掉原有的 AS 信息，而该关键字用来添加原始的 AS 路径信息到 **`AS_PATH`** 属性中。AS-SET 是 **`AS_PATH`** 中的一种 segment 类型，记录明细路由的 AS 号，用于避免聚合时路径信息的丢失带来的环路隐患。
+
+```java{.line-numbers}
+[R2-bgp]aggregate 172.16.0.0 16
+<R4>display bgp routing-table
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 4
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  172.16.0.0         10.1.2.2                   100        0      i
+ *>i  172.16.1.0/24      10.1.2.2        0          100        0      100i
+ *>i  172.16.2.0/24      10.1.2.2        0          100        0      100i
+ *>i  172.16.3.0/24      10.1.2.2        0          100        0      100i
+[R2-bgp]aggregate 172.16.0.0 16 as-set 
+<R4>display bgp routing-table
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 4
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  172.16.0.0         10.1.2.2                   100        0      100i
+ *>i  172.16.1.0/24      10.1.2.2        0          100        0      100i
+ *>i  172.16.2.0/24      10.1.2.2        0          100        0      100i
+ *>i  172.16.3.0/24      10.1.2.2        0          100        0      100i
+```
+
+现在我们做一个实验来进行验证，假设我们在 R1 上配置如下 route-policy，将 R1 发送的明细路由 **`172.16.2.0/24`** 的 as-path 路径增加 300 400 的 AS 号，将 **`172.16.3.0/24`** 的 as-path 路径增加 500 400 的 AS 号，接着在 R2 上进行手动聚合。因此聚合路由的 **`AS_PATH`** 规则为普通有序部分直接以 **`AS_SEQUENCE`** 形式保留在 **`AS_PATH`** 中。联盟有序部分以 (65001) 这类 **`AS_CONFED_SEQUENCE`** 形式保留，无法保持顺序的部分则转为相应的 SET，其中联盟内部的无序 AS 集合用 [] 表示，联盟外部的无序 AS 集合用 {} 表示。
+
+```java{.line-numbers}
+[R1]display route-policy 
+Route-policy : LP2-EX
+  permit : 10 (matched counts: 2)
+    Match clauses : 
+      if-match ip-prefix LP2
+    Apply clauses : 
+      apply as-path 300 400 additive
+  permit : 20 (matched counts: 2)
+    Match clauses : 
+      if-match ip-prefix LP3
+    Apply clauses : 
+      apply as-path 500 400 additive
+  permit : 30 (matched counts: 1)
+<R4>display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 4
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  172.16.0.0         10.1.2.2                   100        0      100 {400 300 500}i
+ *>i  172.16.1.0/24      10.1.2.2        0          100        0      100i
+ *>i  172.16.2.0/24      10.1.2.2        0          100        0      100 300 400i
+ *>i  172.16.3.0/24      10.1.2.2        0          100        0      100 500 400i
+<R5>display bgp routing-table 
+ BGP Local router ID is 5.5.5.5 
+ Total Number of Routes: 2
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   172.16.1.0/24      10.1.45.4                             0      200 100i
+ *>   172.16.3.0/24      10.1.45.4                             0      200 100 500 400i
+```
+
+### 4.3 BGP 默认路由
+
+如果一台设备在网络中有多个 eBGP 邻居，或者存在多个路由反射器，那么该设备将会从邻居或者反射器接收全网的路由，该设备也会向 AS 内的 iBGP 对等体发布路由，这样会极大地增加路由表的容量，通过向对等体发布缺省路由，减少对等体路由表的数量。具体配置如下：
+
+```java{.line-numbers}
+peer {group-name|ipv4-address|ipv6-address} default-route-advertise [route-policy route-policy-name] [conditional-route-match-all | conditional-route-match-any]
+```
+
+该命令用来向对等体发布一条默认路由，可以通过 **`route-policy`** 来设置默认路由的属性，**`conditional-route-match-any/all`** 用来设置匹配条件，如果满足条件则发布默认路由。**any 是指当匹配任一条条件时，发布默认路由；all 是指当匹配所有条件时，发布默认路由**。
+
