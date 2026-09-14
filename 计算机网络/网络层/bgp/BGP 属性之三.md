@@ -256,7 +256,7 @@ R3 本身直接从 R6 学到 AS400 路径，并按默认 **`Local_Pref`** 100 �
 
 把整个过程连起来看，这个实验真正构造的是一个非常关键的 **`Local_Pref`** 大小关系：R1 从 R2 方向最终使用的 **`Local_Pref`** 为 80，从 R3 方向最终使用的 **`Local_Pref`** 为 90，而外部 eBGP 路由在本地没有被策略修改时按照默认 **`Local_Pref`** 100 处理，即形成 80 < 90 < 100。这三个值分别承担不同作用：90 > 80 保证 R1 在 R2 和 R3 两个 Client 的路径之间选择 R3，从而使 R1 走 AS400。而 100 > 90 又保证 R2 在 R1 反射过来的 AS400 路径和自己直接从 R4 学到的 **`AS200->AS300`** 路径之间选择 R4，从而使 R2 走 **`AS200->AS300`**。R3 则直接保持 AS400 路径。
 
-## 2.调整 prefVal 首选权重值
+## 2.案例 2 调整 prefVal 首选权重值
 
 <div align="center">
     <img src="bgp_static/31.png" width="650"/>
@@ -339,7 +339,7 @@ Route-policy : PrefVal
 
 未修改之前 R1 默认选 R3 作为下一跳，而 R2 修改了 **`PrefVal`** 值并不会影响 R1 的选路，因此 R1 不受影响，依然会选择 R3 作为下一跳。在未修改属性之前，R2 经由 R1 去往目标网络，但是在 R2 上将 R4 通告来的路由改大了 **`PrefVal`** 值，该值在选路规则中位列第一位，最优先比较，因此 R2 将会选择 R4 作为下一跳。R2 修改的 **`PrefVal`** 值也不会影响 R3 的 BGP 选路，因此无需做任何修改，R3 同样会选择 R6 作为下一跳。
 
-## 3.通过策略调整 MED 属性
+## 3.案例 3 通过策略调整 MED 属性
 
 在下图拓扑中，AS 100 为 ISP1，AS 300 为 ISP2，AS 200 和 AS 400 为某企业通过 BGP 接入到 ISP。AS 200 有两个网段，分别为 **`172.16.30.0/24`** 和 **`172.16.31.0/24`**，通过调整 BGP 路径属性来实现选路。
 
@@ -440,7 +440,7 @@ Route-policy : SMED
  *                       10.1.16.1       100                   0      100 200i
 ```
 
-## 4.通过策略调整 **`AS_PATH`** 属性
+## 4.案例 4通过策略调整 **`AS_PATH`** 属性
 
 <div align="center">
     <img src="bgp_static/31.png" width="650"/>
@@ -452,5 +452,158 @@ Route-policy : SMED
 - 要求 R1 和 R2 经过 AS 200 到达 **`100.1.1.0`** 网络。
 - R3 经过 AS 400 到达目标。
 
-在 R3 的入方向应用策略修改 **`AS_PATH`** 属性，将 **`AS_PATH`** 的长度增加一个 AS 号，为了确保 AS 100 中所有路由器到达 **`100.1.1.0`** 网段，AS 号长度相等，那么 R2 将会选择 AS 200 访问。因为 **`AS_PATH`** 长度一致后，将会比较第 7 步，由于是来自 eBGP 的路由，将优于 iBGP。R1 会收到两条路由，下一跳分别为 R2 和 R3，R1 将会选择 R2 访问，在路径比较的时候将会比较到最后一步，选择 **`Router_ID`** 最小的值，因此下一跳会选择 R2。而 R3 也是从 eBGP 收到的路由，因此会选择 AS 400 到达。
+在 R3 的入方向应用策略修改 **`AS_PATH`** 属性，将 **`AS_PATH`** 的长度增加一个 AS 号。具体的配置如下所示：
+
+```java{.line-numbers}
+[R3-bgp]display route-policy 
+Route-policy : AP
+  permit : 10 (matched counts: 1)
+    Match clauses : 
+      if-match ip-prefix LP
+    Apply clauses : 
+      apply as-path 500 additive
+  permit : 20 (matched counts: 0)
+[R3]display this 
+#
+ip ip-prefix LP index 10 permit 100.1.1.0 24
+```
+
+配置完成之后，R1、R2、R3 的 BGP 路由表中关于 **`100.1.1.0/24`** 的路由信息如下：
+
+```java{.line-numbers}
+<R1>display bgp routing-table 100.1.1.0
+    BGP local router ID : 1.1.1.1
+    Local AS number : 100
+    Paths:   2 available, 1 best, 1 select
+    BGP routing table entry information of 100.1.1.0/24:
+    RR-client route.
+    From: 10.1.12.2 (2.2.2.2)
+    Route Duration: 00h00m23s  
+    Relay IP Nexthop: 0.0.0.0
+    Relay IP Out-Interface: GigabitEthernet0/0/0
+    Original nexthop: 10.1.12.2
+    Qos information : 0x0
+    AS-path 200 300, origin igp, localpref 100, pref-val 0, valid, internal, best, select, active, pre 255
+    Advertised to such 2 peers:
+      10.1.12.2
+      10.1.13.3
+    BGP routing table entry information of 100.1.1.0/24:
+    RR-client route.
+    From: 10.1.13.3 (3.3.3.3)
+    Route Duration: 00h00m23s  
+    Relay IP Nexthop: 0.0.0.0
+    Relay IP Out-Interface: GigabitEthernet0/0/1
+    Original nexthop: 10.1.13.3
+    Qos information : 0x0
+    AS-path 500 400, origin igp, MED 0, localpref 100, pref-val 0, valid, internal, pre 255, not preferred for router ID
+    Not advertised to any peer yet
+<R2>display bgp routing-table 100.1.1.0
+    BGP local router ID : 2.2.2.2
+    Local AS number : 100
+    Paths:   1 available, 1 best, 1 select
+    BGP routing table entry information of 100.1.1.0/24:
+    From: 10.1.24.4 (10.1.24.4)
+    Route Duration: 00h07m21s  
+    Direct Out-interface: GigabitEthernet0/0/1
+    Original nexthop: 10.1.24.4
+    Qos information : 0x0
+    AS-path 200 300, origin igp, pref-val 0, valid, external, best, select, active, pre 255
+    Advertised to such 1 peers:
+      10.1.12.1
+[R3]display bgp routing-table 100.1.1.0
+    BGP local router ID : 3.3.3.3
+    Local AS number : 100
+    Paths:   2 available, 1 best, 1 select
+    BGP routing table entry information of 100.1.1.0/24:
+    From: 10.1.36.6 (10.1.36.6)
+    Route Duration: 00h05m22s  
+    Direct Out-interface: GigabitEthernet0/0/1
+    Original nexthop: 10.1.36.6
+    Qos information : 0x0
+    AS-path 500 400, origin igp, MED 0, pref-val 0, valid, external, best, select, active, pre 255
+    Advertised to such 1 peers:
+      10.1.13.1
+    BGP routing table entry information of 100.1.1.0/24:
+    From: 10.1.13.1 (1.1.1.1)
+    Route Duration: 00h05m10s  
+    Relay IP Nexthop: 10.1.13.1
+    Relay IP Out-Interface: GigabitEthernet0/0/0
+    Original nexthop: 10.1.12.2
+    Qos information : 0x0
+    AS-path 200 300, origin igp, localpref 100, pref-val 0, valid, internal, pre 255, IGP cost 2, not preferred for peer type
+    Originator:  2.2.2.2
+    Cluster list: 0.0.0.100
+    Not advertised to any peer yet
+```
+
+配置完成后，R1 同时从两个 RR Client 收到 **`100.1.1.0/24`**。在 R1 上，两条路由的 **`PrefVal`**、**`Local_Pref`** 均相同，**`AS_PATH`** 长度也都是 2，Origin 均为 IGP，两条路由又都是 IBGP 路由，因此继续比较后续 Router ID 属性，因此直接比较 R2、R3 的 **`Router ID：2.2.2.2 < 3.3.3.3`**，最终选择来自 R2 的路径，输出中的 **`not preferred for router ID`** 也证明了这一点。
+
+R1 将 Best 路由向 R2 和 R3 通告。在本实验所使用的 VRP 实现中（如下所示），R1 的确把源自 R2 的 Best 路由反射回了 R2。
+
+```java{.line-numbers}
+<R1>display bgp routing-table peer 10.1.12.2 advertised-routes 100.1.1.0 24
+
+ BGP local router ID : 1.1.1.1
+ Local AS number : 100
+ BGP routing table entry information of 100.1.1.0/24:
+ RR-client route.
+ From: 10.1.12.2 (2.2.2.2)
+ Route Duration: 00h53m35s  
+ Relay IP Nexthop: 0.0.0.0
+ Relay IP Out-Interface: GigabitEthernet0/0/0
+ Original nexthop: 10.1.12.2
+ Advertised nexthop: 10.1.12.2
+ Qos information : 0x0
+ AS-path 200 300, origin igp, localpref 100
+ Originator:  2.2.2.2
+ Cluster list: 0.0.0.100
+```
+
+在 R2 上开启 **`debug bgp all`** 后，可以进一步确认 R2 确实收到了来自 R1 的 UPDATE 报文，报文中携带 **`ORIGINATOR_ID=2.2.2.2`** 和 **`CLUSTER_LIST=0.0.0.100`**。R2 收到该反射路由后，发现 **`ORIGINATOR_ID`** 与自己的 **`BGP Router ID 2.2.2.2`** 完全相同，因此触发 RR 的簇内防环机制，该路由被忽略。从 Debug 中也可以看到设备将该 UPDATE 中对应的 NLRI 按 Withdraw/不可用的方式处理。因此，R2 没有在 BGP 路由表中看到来自 R1 的这条反射路由，并不等于 R2 没有收到 UPDATE。所以 R2 最终仍然只有直接从 R4 学到的 eBGP 路由。
+
+```java{.line-numbers}
+<R2> terminal monitor
+<R2> terminal debugging
+<R2>debugging bgp 10.1.12.1 all
+Sep 14 2026 23:22:06.130.2-08:00
+R2 RM/6/RMDEBUG:BGP: peer 10.1.12.1 (SockID 7) reads 72 bytes on socket 7.
+
+Sep 14 2026 23:22:06.130.3-08:00
+R2 RM/6/RMDEBUG: BGP: Received from 10.1.12.1 (AS Number: 100) (Displaying bytes from 1 to 72)
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+00 48 02 00 00 00 2D
+40 01 01 00
+40 02 0A 02 02 00 00 00 C8 00 00 01 2C
+40 03 04 0A 01 0C 02
+40 05 04 00 00 00 64
+80 09 04 02 02 02 02
+80 0A 04 00 00 00 64
+18 64 01 01
+
+Sep 14 2026 23:22:06.130.4-08:00
+R2 RM/6/RMDEBUG: BGP.Public: Error identified while receiving UPDATE message from the peer 10.1.12.1 and ignored. Reason:(ORIGINATORID equal to RouterID).
+
+Sep 14 2026 23:22:06.130.5-08:00
+R2 RM/6/RMDEBUG:
+BGP: routes in update message need to be processed as withdrawn message due to reason mentioned above.
+
+Sep 14 2026 23:22:06.130.6-08:00 R2 RM/6/RMDEBUG: BGP.Public:
+Recv UPDATE from 10.1.12.1 with following destinations:
+    Update message length : 72
+    MP_reach              : AFI/SAFI 1/1
+    Origin                : IGP
+    AS Path               : 200 300
+    Next Hop              : 0.0.0.0
+    Local Pref            : 100
+BGP.Public: Recv UPDATE(Withdraw) MSG from 10.1.12.1 for destinations: 100.1.1.0/24
+```
+
+另外，根据 RFC 4456，**`ORIGINATOR_ID`** is a new optional, non-transitive BGP attribute of Type code 9. This attribute is 4 bytes long and it will be created by an RR in reflecting a route. This attribute will carry the BGP Identifier of the originator of the route in the local AS. 也就是说，在本实验中，R1 最初从 R2、R3 收到的两条候选路由只是 **`Client->RR`** 的普通 IBGP UPDATE：一条来自 R2，其 Router ID 为 **`2.2.2.2`**；另一条来自 R3，其 Router ID 为 **`3.3.3.3`**。它们此时尚未经历 R1 的反射，因此 R1 本地保存的这两条原始候选路径中没有 **`ORIGINATOR_ID`**。只有当 R1 将所选 Best 路由反射出去时，才会创建 **`ORIGINATOR_ID=2.2.2.2`**。
+
+R3 有 2 条候选路由，两条路由的 **`AS_PATH`** 长度均为 2，Origin 均为 IGP。随后比较 Peer Type，因此 R3 选择从 **`10.1.36.6`** 直接学习到的 eBGP 路由。
+
+修改 **`AS_PATH`** 属性时可以携带两个参数。
+
+- Additive 用于添加 AS 号，可添加多个 AS 号，比如原 AS 号为 **`（200 300）`**，配置 **`apply as-path 500 600 additive`** 命令，则在原 **`AS_PATH`** 添加 AS 两个号，修改后路径为 **`（500, 600, 200, 300）`**。
+- Overwrite 用于覆盖前面的 AS 号，比如原 AS 号为 400，而配置 **`apply as-path 500 overwrite`** 命令，则 as-path 列表更改为 **`（500）`**。
 

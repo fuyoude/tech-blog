@@ -392,6 +392,19 @@ Route-policy : R5-IN
  *>   100.1.15.1/32      45.1.1.4                              0      internet
 ```
 
+设置团体属性后可以与 **`ip community-filter`** 结合使用，用于作为 route-policy 策略工具中的匹配语句，该过滤器可以分为基本团体属性过滤器和高级团体属性过滤器。
+
+基本团体属性过滤器可以指定自定义的团体号或者公共的团体属性值。配置基本团体属性可以使用配置命令 **`ip community-filter basic comm-filter-name`** 或命令 **`ip community-filter basic-comm-filter-num`**。前者可以指定基本团体属性过滤器的名称，但名称必须包含非数字字符，一次最多可以配置 20 个团体号。后者只能配置过滤器号是 1 ~ 99 的基本团体属性，一次最多可以配置 20 个团体号。示例如下所示：
+
+```java{.line-numbers}
+// 匹配自定义团体属性为 100:200 的路由。
+[huawei]ip community-filter 1 permit 100:200
+// 匹配公共团体属性为 no-export 的路由。
+[huawei]ip community-filter 2 permit no-export
+```
+
+高级团体属性过滤器可以指定正则表达式作为匹配条件。配置高级团体属性过滤器可通过命令 **`ip community-filter advanced comm-filter-name`** 或命令 **`ip community-filter adv-comm-filter-num`** 进行配置。前者可以指定高级团体属性过滤器的名称，但名称必须包含非数字字符。后者只能配置过滤器号是 100 ~ 199 的高级团体属性。
+
 ## 7.PrefVal 属性
 
 PrefVal 是 Preferred-Value 的简写，区别于前面介绍的其他属性，首选权值是华为设备内部分配给路由的权值，它并不是在路由更新中可传递的 BGP 标准属性。
