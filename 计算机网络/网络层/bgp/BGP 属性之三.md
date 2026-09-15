@@ -607,3 +607,252 @@ R3 有 2 条候选路由，两条路由的 **`AS_PATH`** 长度均为 2，Origin
 - Additive 用于添加 AS 号，可添加多个 AS 号，比如原 AS 号为 **`（200 300）`**，配置 **`apply as-path 500 600 additive`** 命令，则在原 **`AS_PATH`** 添加 AS 两个号，修改后路径为 **`（500, 600, 200, 300）`**。
 - Overwrite 用于覆盖前面的 AS 号，比如原 AS 号为 400，而配置 **`apply as-path 500 overwrite`** 命令，则 as-path 列表更改为 **`（500）`**。
 
+## 5.案例 5 客户多归属同一运营商 BGP 部署
+
+如下图所示，某企业两条链路连接同一运营商，其中，R1 和 R2 属于客户 AS 100，R3 与 R4 属于 ISP 为 AS 200，R5 和 R6 分别在 AS 300 和 AS 400 中。Line-1 为 R1 与 R3 的链路（主链路），Line-2 为 R2 与 R4 的链路（备份链路）。
+
+<div align="center">
+    <img src="bgp_static/33.png" width="740"/>
+</div>
+
+此时 R1 和 R2 的 BGP 路由表如下所示：
+
+```java{.line-numbers}
+<R1>display bgp routing-table
+ BGP Local router ID is 1.1.1.1 
+ Total Number of Routes: 12
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.30.1.0/24       13.1.1.3        0                     0      200i
+ * i                     12.1.1.2                   100        0      200i
+ *>   40.40.1.0/24       13.1.1.3                              0      200i
+ * i                     12.1.1.2        0          100        0      200i
+ *>   100.1.1.0/24       0.0.0.0         0                     0      i
+ *>   100.1.3.0/24       0.0.0.0         0                     0      i
+ *>   177.1.1.0/24       13.1.1.3                              0      200 300i
+ * i                     12.1.1.2                   100        0      200 300i
+ *>   199.1.1.0          13.1.1.3                              0      200 400i
+ * i                     12.1.1.2                   100        0      200 400i
+ *>i  202.2.2.0          12.1.1.2        0          100        0      i
+ *>i  202.2.4.0          12.1.1.2        0          100        0      i
+<R2>display bgp routing-table 
+ BGP Local router ID is 2.2.2.2 
+ Total Number of Routes: 12
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.30.1.0/24       24.1.1.4                              0      200i
+ * i                     12.1.1.1        0          100        0      200i
+ *>   40.40.1.0/24       24.1.1.4        0                     0      200i
+ * i                     12.1.1.1                   100        0      200i
+ *>i  100.1.1.0/24       12.1.1.1        0          100        0      i
+ *>i  100.1.3.0/24       12.1.1.1        0          100        0      i
+ *>   177.1.1.0/24       24.1.1.4                              0      200 300i
+ * i                     12.1.1.1                   100        0      200 300i
+ *>   199.1.1.0          24.1.1.4                              0      200 400i
+ * i                     12.1.1.1                   100        0      200 400i
+ *>   202.2.2.0          0.0.0.0         0                     0      i
+ *>   202.2.4.0          0.0.0.0         0                     0      i
+```
+
+现在需要实现的需求如下：
+
+- 对于所有到达 AS 200 和 AS 300 的出业务流量，AS 100 应该选择 Line-1 链路，如该链路发生故障，应该切换到 Line-2 链路；而到达 AS 400 应该选择 Line-2 链路。
+- 进入到 AS 100 的流量应该遵循最优原则，访问 R1 所属的网段应该从 Line-1 进入，访问 R2 所属的网段应该从 Line-2 链路进入。
+- 不允许客户的 AS 作为穿越 AS。
+
+对于需求 1，本质上需要影响 AS100 的出业务流量方向，所以可以使用 **`local_pref`** 属性来进行控制。来自 AS 200 和 AS 300 的业务流量，在 AS 100 中看到的 AS-PATH 分别为 **`200`** 和 **`200 300`**。所以 R1 可以从 R3 接收路由的入方向分别使用 **`as-path-filter ^200$`** 和 **`as-path-filter _300$`** 来匹配。对于这些匹配到的来自 AS 200 和 AS 300 的路由，R1 在入方向将其 **`local_pref`** 属性值设置为 200，而来自 AS 400 的路由的 **`local_pref`** 属性值默认为 100。来自 AS 400 的业务流量的 AS-PATH 为 **`200 400`**，所以 R2 可以从 R4 接收路由的入方向使用 **`as-path-filter _400$`** 来匹配，R2 在入方向将其 **`local_pref`** 属性值设置为 200。
+
+对于需求 2，本质上需要影响 AS100 的入业务流量放行，所以可以使用 MED 属性来进行控制。MED 用于向相邻 AS 表达进入本 AS 时优先选择哪个入口，在其他条件相同的情况下，MED 值越小的路径越优。在 R1 的出方向上，可以使用路由策略在 R1 向 R3 通告路由的出方向上，将 R1 **`100.1.1.0/24`** 和 **`100.1.3.0/24`** 网段的 MED 属性值修改为 50，将 R2 **`202.2.2.0/24`** 和 **`202.2.4.0/24`** 网段的 MED 属性值修改为 100。对于 R2 则相反。
+
+对于需求 3，为了防止该现象的发生，在 R1 和 R2 上分别针对 R3 和 R4 的出方向应用 **`as-path-filter`**，该 AS 过滤器通过 **`^$`** 来匹配空 **`AS-PATH`** 号（因为 AS 100 向外通告路由时不会将自己的 AS 号加入进 **`AS_PATH`** 列表中）。此做法用来将仅仅始发于 AS 100 的路由通告给 R3 和 R4，而来自其他 AS 的路由如 **`AS 200`**、**`AS 300`**、**`AS 400`**，在 **`AS_PATH`** 列表中必然会有 AS 号，因此都被拒绝。R3 和 R4 也不会从 R1 和 R2 收到来自 AS 300 或者 AS 400 的路由，即使 ISP 之间链路失效了，AS 100 不会成为穿越 AS。
+
+另外需要注意的是，**`^$ `** 做出方向匹配时，匹配的是路由当前已有的 **`AS_PATH`**，而 eBGP 自动添加本地 AS，是在这条路由通过出口策略、真正生成对外 UPDATE 时发生的。根据华为的文档，**`^$`** 匹配空字符串，即 **`AS_Path`** 为空，通常用来匹配本地始发路由。The apply as-path command takes effect before the local AS number is added when EBGP is used and an export policy is applied. 具体的流程图如下所示：
+
+```mermaid{align="center" style="width:35%;margin:18px auto;"}
+---
+title: BGP 本地始发路由的 AS_PATH 匹配与添加过程
+---
+flowchart TD
+    A["AS100 本地始发路由"]
+    B["进入本地 BGP 表<br/>AS_PATH = 空（Nil）"]
+    C["执行发往 EBGP Peer 的出口策略<br/>ip as-path-filter 1 permit ^$"]
+    D["此时出口策略看到的仍然是<br/>AS_PATH = 空字符串"]
+    E{"^$ 是否匹配？"}
+    F["匹配成功"]
+    H["BGP 构造 EBGP UPDATE, 向 EBGP Peer 发送前<br/>自动加入本地 AS 100"]
+    J["最终 AS_PATH = 100"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E -->|是| F
+    F --> H
+    H --> J
+    
+    classDef default fill:#FFFFFF,stroke:#E5E7EB,stroke-width:1px,color:#202124,font-size:14px;
+    linkStyle default stroke:#6B7280,stroke-width:1px,fill:none;
+```
+
+R1 上的配置如下所示：
+
+```java{.line-numbers}
+[R1]display this 
+#
+ip as-path-filter 1 permit ^$
+ip as-path-filter 3 permit ^200$
+ip as-path-filter 3 permit _300$
+[R1]display acl all
+ Total nonempty ACL number is 2 
+Basic ACL 2000, 1 rule
+ rule 10 permit source 100.1.1.0 0.0.2.0 (4 times matched)
+Basic ACL 2001, 1 rule
+ rule 10 permit source 202.2.0.0 0.0.6.0 (4 times matched)
+[R1]display route-policy 
+Route-policy : N1
+  permit : 10 (matched counts: 3)
+    Match clauses : 
+      if-match as-path-filter 3
+    Apply clauses : 
+      apply local-preference 200
+  permit : 20 (matched counts: 1)
+Route-policy : N2
+  permit : 10 (matched counts: 2)
+    Match clauses : 
+      if-match acl 2000
+    Apply clauses : 
+      apply cost 50 
+  permit : 20 (matched counts: 2)
+    Match clauses : 
+      if-match acl 2001
+    Apply clauses : 
+      apply cost 100 
+[R1-bgp]display this 
+#
+bgp 100
+ router-id 1.1.1.1
+ peer 12.1.1.2 as-number 100
+ peer 13.1.1.3 as-number 200
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 100.1.1.0 255.255.255.0
+  network 100.1.3.0 255.255.255.0
+  peer 12.1.1.2 next-hop-local
+  peer 13.1.1.3 as-path-filter 1 export
+  peer 13.1.1.3 route-policy N1 import
+  peer 13.1.1.3 route-policy N2 export
+```
+
+R2 上的配置如下所示：
+
+```java{.line-numbers}
+[R2]display this 
+#
+ip as-path-filter 1 permit ^$
+ip as-path-filter 4 permit _400$
+[R2]display acl all
+ Total nonempty ACL number is 2 
+Basic ACL 2000, 1 rule
+ rule 10 permit source 202.2.0.0 0.0.6.0 (4 times matched)
+Basic ACL 2001, 1 rule
+ rule 10 permit source 100.1.1.0 0.0.2.0 (4 times matched)
+[R2]display route-policy 
+Route-policy : N1
+  permit : 10 (matched counts: 1)
+    Match clauses : 
+      if-match as-path-filter 4
+    Apply clauses : 
+      apply local-preference 200
+  permit : 20 (matched counts: 3)
+Route-policy : N2
+  permit : 10 (matched counts: 2)
+    Match clauses : 
+      if-match acl 2000
+    Apply clauses : 
+      apply cost 50 
+  permit : 20 (matched counts: 2)
+    Match clauses : 
+      if-match acl 2001
+    Apply clauses : 
+      apply cost 100 
+[R2-bgp]display this 
+#
+bgp 100
+ router-id 2.2.2.2
+ peer 12.1.1.1 as-number 100
+ peer 24.1.1.4 as-number 200
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 202.2.2.0
+  network 202.2.4.0
+  peer 12.1.1.1 next-hop-local
+  peer 24.1.1.4 as-path-filter 1 export
+  peer 24.1.1.4 route-policy N1 import
+  peer 24.1.1.4 route-policy N2 export
+```
+
+R1 和 R2 的 BGP 路由表如下所示，可以看出 R1 到达 AS 200 和 AS 300 都选择通过 R3 转发，且本地优先级都被修改为 200，而 R2 也将选择 R1 去往 AS 200 和 AS 300，因为 Line-1 为主链路。但去往 AS 400 中的路由，R1 和 R2 都选择 了 Line-2 链路。
+
+```java{.line-numbers}
+<R1>display bgp routing-table 
+ BGP Local router ID is 1.1.1.1 
+ Total Number of Routes: 9
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.30.1.0/24       13.1.1.3        0          200        0      200i
+ *>   40.40.1.0/24       13.1.1.3                   200        0      200i
+ *>   100.1.1.0/24       0.0.0.0         0                     0      i
+ *>   100.1.3.0/24       0.0.0.0         0                     0      i
+ *>   177.1.1.0/24       13.1.1.3                   200        0      200 300i
+ *>i  199.1.1.0          12.1.1.2                   200        0      200 400i
+ *                       13.1.1.3                              0      200 400i
+ *>i  202.2.2.0          12.1.1.2        0          100        0      i
+ *>i  202.2.4.0          12.1.1.2        0          100        0      i
+[R2-bgp]display bgp routing-table 
+ BGP Local router ID is 2.2.2.2 
+ Total Number of Routes: 11
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  30.30.1.0/24       12.1.1.1        0          200        0      200i
+ *                       24.1.1.4                              0      200i
+ *>i  40.40.1.0/24       12.1.1.1                   200        0      200i
+ *                       24.1.1.4        0                     0      200i
+ *>i  100.1.1.0/24       12.1.1.1        0          100        0      i
+ *>i  100.1.3.0/24       12.1.1.1        0          100        0      i
+ *>i  177.1.1.0/24       12.1.1.1                   200        0      200 300i
+ *                       24.1.1.4                              0      200 300i
+ *>   199.1.1.0          24.1.1.4                   200        0      200 400i
+ *>   202.2.2.0          0.0.0.0         0                     0      i
+ *>   202.2.4.0          0.0.0.0         0                     0      i
+```
+
+R3 和 R4 的 BGP 路由表如下所示，R3 的 BGP 表中可以看到去往 R1 上的路由从 Line-1 链路进入，且 MED 值修改为 50，去往 R2 上的路由经过 Line-2 链路进入，R4 去往 R1 上的路由从 Line-1 链路进入，去往 R2 从 Line-2 链路进入。
+
+```java{.line-numbers}
+<R3>display bgp routing-table 
+ BGP Local router ID is 3.3.3.3 
+ Total Number of Routes: 10
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.30.1.0/24       0.0.0.0         0                     0      i
+ *>i  40.40.1.0/24       34.1.1.4        0          100        0      i
+ *>   100.1.1.0/24       13.1.1.1        50                    0      100i
+ *>   100.1.3.0/24       13.1.1.1        50                    0      100i
+ *>   177.1.1.0/24       35.1.1.5        0                     0      300i
+ *>i  199.1.1.0          34.1.1.4        0          100        0      400i
+ *>i  202.2.2.0          34.1.1.4        50         100        0      100i
+ *                       13.1.1.1        100                   0      100i
+ *>i  202.2.4.0          34.1.1.4        50         100        0      100i
+ *                       13.1.1.1        100                   0      100i
+<R4>display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 10
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>i  30.30.1.0/24       34.1.1.3        0          100        0      i
+ *>   40.40.1.0/24       0.0.0.0         0                     0      i
+ *>i  100.1.1.0/24       34.1.1.3        50         100        0      100i
+ *                       24.1.1.2        100                   0      100i
+ *>i  100.1.3.0/24       34.1.1.3        50         100        0      100i
+ *                       24.1.1.2        100                   0      100i
+ *>i  177.1.1.0/24       34.1.1.3        0          100        0      300i
+ *>   199.1.1.0          46.1.1.6        0                     0      400i
+ *>   202.2.2.0          24.1.1.2        50                    0      100i
+ *>   202.2.4.0          24.1.1.2        50                    0      100i
+```
