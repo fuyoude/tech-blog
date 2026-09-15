@@ -856,3 +856,227 @@ R3 和 R4 的 BGP 路由表如下所示，R3 的 BGP 表中可以看到去往 R1
  *>   202.2.2.0          24.1.1.2        50                    0      100i
  *>   202.2.4.0          24.1.1.2        50                    0      100i
 ```
+
+## 6.案例 6 不同运营商的客户间互为主备
+
+如下图所示，分别隶属于 AS100 和 AS200 的两家客户设备 R1 和 R2 分别连接着不同运营商设备 R3 和 R4。
+
+<div align="center">
+    <img src="bgp_static/34.png" width="600"/>
+</div>
+
+现在需要实现的需求如下所示：
+
+- 对于客户的出业务流量：客户 AS（AS100 和 AS200）访问运营商时，AS100 选择从 ISP1 访问，AS200 选择从 ISP2 访问。但是当 Line-1 和 Line-2 链路发生故障时，客户 AS 之间能够互为备份。
+- 对于客户的入业务流量：ISP1 选择经过 Line-1 链路进入到 AS100，而 ISP2 选择经过 Line-2 链路进入到 AS200。ISP1 访问 AS200 需要经过 ISP2，而不能将 AS100 作为穿越的 AS。同理，ISP2 访问 AS100 需要经过 ISP1 访问。
+- 如果 ISP1 与 ISP2 之间的链路出现故障，客户的 AS 能够互为备份，以实现冗余。
+
+R1 上的配置如下所示：
+
+```java{.line-numbers}
+#
+bgp 100
+ router-id 1.1.1.1
+ peer 12.1.1.2 as-number 200 
+ peer 13.1.1.3 as-number 300 
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 101.10.1.0 255.255.255.0 
+  network 102.10.1.0 255.255.255.0 
+  peer 12.1.1.2 enable
+  peer 13.1.1.3 enable
+  peer 13.1.1.3 as-path-filter 1 export 
+  peer 13.1.1.3 route-policy SET_PrefVal import
+  peer 13.1.1.3 route-policy SET_COM export
+  peer 13.1.1.3 advertise-community
+#
+route-policy SET_COM permit node 10 
+ if-match as-path-filter 2 
+ apply community 200:200 
+#
+route-policy SET_COM permit node 20 
+#
+route-policy SET_PrefVal permit node 20 
+ if-match as-path-filter 3 
+ apply preferred-value 150
+#
+route-policy SET_PrefVal permit node 30 
+#
+ip as-path-filter 1 permit ^$
+ip as-path-filter 1 permit ^200$
+ip as-path-filter 2 permit ^200$
+ip as-path-filter 3 permit _400$
+```
+
+R2 上的配置如下所示：
+
+```java{.line-numbers}
+#
+bgp 200
+ router-id 2.2.2.2
+ peer 12.1.1.1 as-number 100 
+ peer 24.1.1.4 as-number 400 
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 201.10.1.0 
+  network 202.10.1.0 
+  peer 12.1.1.1 enable
+  peer 24.1.1.4 enable
+  peer 24.1.1.4 as-path-filter 1 export 
+  peer 24.1.1.4 route-policy SET_PrefVal import
+  peer 24.1.1.4 route-policy SET_COM export
+  peer 24.1.1.4 advertise-community
+#
+route-policy SET_COM permit node 10 
+ if-match as-path-filter 2 
+ apply community 100:100 
+#
+route-policy SET_COM permit node 20 
+#
+route-policy SET_PrefVal permit node 10 
+ if-match as-path-filter 3 
+ apply preferred-value 150
+#
+route-policy SET_PrefVal permit node 20 
+#
+ip as-path-filter 1 permit ^$
+ip as-path-filter 1 permit ^100$
+ip as-path-filter 2 permit ^100$
+ip as-path-filter 3 permit _300$
+```
+
+R3 上的配置如下所示：
+
+```java{.line-numbers}
+#
+bgp 300
+ router-id 3.3.3.3
+ peer 13.1.1.1 as-number 100 
+ peer 34.1.1.4 as-number 400 
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 30.1.1.0 255.255.255.0 
+  network 30.1.2.0 255.255.255.0 
+  peer 13.1.1.1 enable
+  peer 13.1.1.1 route-policy SET_LP import
+  peer 34.1.1.4 enable
+#
+route-policy SET_LP permit node 10 
+ if-match community-filter 1 
+ apply local-preference 50 
+#
+route-policy SET_LP permit node 20 
+#
+ip community-filter 1 permit 200:200
+```
+
+R4 上的配置如下所示：
+
+```java{.line-numbers}
+#
+bgp 400
+ router-id 4.4.4.4
+ peer 24.1.1.2 as-number 200 
+ peer 34.1.1.3 as-number 300 
+ #
+ ipv4-family unicast
+  undo synchronization
+  network 40.1.1.0 255.255.255.0 
+  network 40.1.2.0 255.255.255.0 
+  peer 24.1.1.2 enable
+  peer 24.1.1.2 route-policy SET_LP import
+  peer 34.1.1.3 enable
+#
+route-policy SET_LP permit node 19 
+ if-match community-filter 1 
+ apply local-preference 50 
+#
+route-policy SET_LP permit node 20 
+#
+ip community-filter 1 permit 100:100
+```
+
+针对出业务流量，在 R1 上使用路由策略 **`SET_PrefVal`** 来调整首选权值，在 node10 中匹配了 **`as-path-filter3`**，**<font color="red">该路径过滤器匹配到了源自 AS400 的流量</font>**，将其首选权值调整为 150，node20 放行其他路由。由于从 R2 也可以访问到 AS400，为了防止从客户之间穿越，优先选择从 AS300 去往 AS400，修改后的首选权值相比默认的要更大，因此 R1 将会选择从 AS300 转发数据流到 AS400。
+
+**<font color="red">R2 同样也使用了路由策略 **`SET_PrefVal`** 策略调整源自 AS300 的路由</font>**，使其优先选择经过 AS400 去往 AS300。当 **`Line-1`** 和 **`Line-2`** 链路出现故障能够满足冗余时，R1 和 R2 之间的链路可以作为备份链路。R1 和 R2 的路由表如下所示，R1 到达 AS400 的网段 **`40.1.1.0/24`**、**`40.1.2.0/24`** 首选权值设置为 150，优先选择从 ISP1 转发。R2 到达 AS300 的网段 **`30.1.1.0/24`**、**`30.1.2.0/24`** 首选权值设置为 150，优先选择从 ISP2 转发。并且 R1 和 R2 到达 AS300 和 AS400 始终有 2 条候选路径，当 Line-1 或者 Line-2 链路出现故障时，客户的 AS 能够互为备份。
+
+```java{.line-numbers}
+[R1]display bgp routing-table 
+ BGP Local router ID is 1.1.1.1 
+ Total Number of Routes: 14
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.1.1.0/24        13.1.1.3        0                     0      300i
+ *                       12.1.1.2                              0      200 400 300i
+ *>   30.1.2.0/24        13.1.1.3        0                     0      300i
+ *                       12.1.1.2                              0      200 400 300i
+ *>   40.1.1.0/24        13.1.1.3                              150    300 400i
+ *                       12.1.1.2                              0      200 400i
+ *>   40.1.2.0/24        13.1.1.3                              150    300 400i
+ *                       12.1.1.2                              0      200 400i
+ *>   101.10.1.0/24      0.0.0.0         0                     0      i
+ *>   102.10.1.0/24      0.0.0.0         0                     0      i
+ *>   201.10.1.0         12.1.1.2        0                     0      200i
+ *                       13.1.1.3                              0      300 400 200i
+ *>   202.10.1.0         12.1.1.2        0                     0      200i
+ *                       13.1.1.3                              0      300 400 200i
+<R2>display bgp routing-table 
+ BGP Local router ID is 2.2.2.2 
+ Total Number of Routes: 14
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.1.1.0/24        24.1.1.4                              150    400 300i
+ *                       12.1.1.1                              0      100 300i
+ *>   30.1.2.0/24        24.1.1.4                              150    400 300i
+ *                       12.1.1.1                              0      100 300i
+ *>   40.1.1.0/24        24.1.1.4        0                     0      400i
+ *                       12.1.1.1                              0      100 300 400i
+ *>   40.1.2.0/24        24.1.1.4        0                     0      400i
+ *                       12.1.1.1                              0      100 300 400i
+ *>   101.10.1.0/24      12.1.1.1        0                     0      100i
+ *                       24.1.1.4                              0      400 300 100i
+ *>   102.10.1.0/24      12.1.1.1        0                     0      100i
+ *                       24.1.1.4                              0      400 300 100i
+ *>   201.10.1.0         0.0.0.0         0                     0      i
+ *>   202.10.1.0         0.0.0.0         0                     0      i
+```
+
+针对入业务流量，ISP1 需要经过 Line-1 链路访问 AS100，ISP2 需要经过 Line-2 链路访问 AS200。在 R1 上使用路由策略 **`SET_COMMUNITY`** 修改团体属性，在 node10 中匹配了 **`as-path-filter2`**，该路径过滤器匹配到了源自 AS200 的路由，将其团体属性设置为 **`200:200`**，node20 放行其他路由，不做任何设置。在 R2 上同样使用路由策略 **`SET_COMMUNITY`** 修改团体属性，将源自 AS100 路由的团体属性设置为 **`100:100`**。此做法目的是为了能够让 ISP1 和 ISP2 收到路由后根据所设置的团体属性来调整路由。
+
+为了保证 ISP 之间不能选择客户的 AS 作为穿越 AS，分别在 R1 和 R2 上使用路径过滤器 **`as-path-filter1`**，该路径过滤器仅允许了 AS100，AS200 的路由通告给 ISP，而不能将 ISP 的流量穿过客户的 AS 再次通告给对方 ISP。例如，ISP1 访问 ISP2 不能选择经过 AS100、AS200 去访问。
+
+在 R3 上通过路由策略 **`SET_LP`** 匹配到 **`community-filter1`**，在该团体属性过滤列表中匹配到团体属性为 **`200:200`**，也就是匹配了所有 AS200 的路由。通过路由策略 **`node10`** 中，将本地优先级调整为 50，node20 放行其他路由，不做任何设置。**<font color="red">由于 R3 分别可以从 R1 和 R4 去访问 AS200，但是从 R1 来的关于 AS200 的路由被调整了本地优先级为 50，而 R3 从 R4 收到的路由本地优先级未做修改，默认为 100，因此 R3 将会优先选择 AS400 去访问 AS200</font>**。针对其他的路由，比如 AS100 的路由仍然选择 R1 访问，由于 **`AS_PATH`** 路径长度的问题。在 R4 上同样通过路由策略 **`SET_LP`**，将 R2 传递给 R4 的关于 AS100 的路由本地优先级修改为 50，那么 R4 将会优先选择 R3 去访问 AS100，而访问 AS200 直接通过 R2 访问。
+
+R3 和 R4 的 BGP 路由表如下所示，R3 到达 AS200 的路由优先选择从 ISP2 转发，并且到达 AS200 有 2 条候选路径，而访问 AS100 优先选择从 ISP1 转发。R4 到达 AS100 的路由优先选择从 ISP1 转发，并且到达 AS100 有 2 条候选路径，而访问 AS200 的路由优先选择从 ISP2 转发。所以当 ISP1 与 ISP2 之间的链路出现故障，客户的 AS 能够互为备份，以实现冗余。
+
+```java{.line-numbers}
+<R3>display bgp routing-table 
+ BGP Local router ID is 3.3.3.3 
+ Total Number of Routes: 10
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.1.1.0/24        0.0.0.0         0                     0      i
+ *>   30.1.2.0/24        0.0.0.0         0                     0      i
+ *>   40.1.1.0/24        34.1.1.4        0                     0      400i
+ *>   40.1.2.0/24        34.1.1.4        0                     0      400i
+ *>   101.10.1.0/24      13.1.1.1        0                     0      100i
+ *>   102.10.1.0/24      13.1.1.1        0                     0      100i
+ *>   201.10.1.0         34.1.1.4                              0      400 200i
+ *                       13.1.1.1                   50         0      100 200i
+ *>   202.10.1.0         34.1.1.4                              0      400 200i
+ *                       13.1.1.1                   50         0      100 200i
+<R4>display bgp routing-table 
+ BGP Local router ID is 4.4.4.4 
+ Total Number of Routes: 10
+      Network            NextHop        MED        LocPrf    PrefVal Path/Ogn
+ *>   30.1.1.0/24        34.1.1.3        0                     0      300i
+ *>   30.1.2.0/24        34.1.1.3        0                     0      300i
+ *>   40.1.1.0/24        0.0.0.0         0                     0      i
+ *>   40.1.2.0/24        0.0.0.0         0                     0      i
+ *>   101.10.1.0/24      34.1.1.3                              0      300 100i
+ *                       24.1.1.2                   50         0      200 100i
+ *>   102.10.1.0/24      34.1.1.3                              0      300 100i
+ *                       24.1.1.2                   50         0      200 100i
+ *>   201.10.1.0         24.1.1.2        0                     0      200i
+ *>   202.10.1.0         24.1.1.2        0                     0      200i
+```
