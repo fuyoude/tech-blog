@@ -53,3 +53,145 @@ MPLS 起初是为了提高数据包转发效率而产生的。因为早期的路
 
 ### 2.2 MPLS 网络结构及术语解释
 
+MPLS 网络的基本结构如下图所示，MPLS 域通过边界路由器连接用户的 IP 网络，一台边界路由器可以同时连接到多个用户的 IP 网络，**<font color="red">在 MPLS 域内的基本单元是标签交换路由器（LSR，Label Switching Router）</font>**，LSR 具有标签分配和基于标签转发数据报文的能力。用户的 IP 数据流进入 MPLS 域后，报文会以标签的方式经过每一台 LSR。为转发带标签的数据报文，每台 LSR 都会建立一张标签转发表，标签转发表就是通过标签分发协议依据路由表产生和建立的。
+
+<div align="center">
+    <img src="mpls_static/1.png" width="450"/>
+</div>
+
+LSR（标签交换路由器）即运行了 MPLS，具有标签分配和标签转发能力的路由器。
+
+LER（标签边界路由器）即具有标签分配能力，并且同时连接 IP 和 MPLS 网络的路由器。分入站的 LER 和出站的 LER。**<font color="red">入站的 LER 负责对接收到的 IP 报文压入标签</font>**，然后转发进 MPLS 网络。**<font color="red">出站的 LER 负责给离开 MPLS 网络的报文移除标签</font>**，然后根据 IP 转发表进行转发。
+
+FEC（转发等价类）用来描述具有相同特征的报文在转发过程中被 LSR 以相同方式处理。在 MPLS 中，一个 FEC 使用同一个标签来标记，**也就是说一个 FEC 的报文走的是同一条 LSP**。划分 FEC 的方式有很多，比如去往相同目的前缀的报文就是一个 FEC。
+
+LSP（标签转发路径）即 MPLS 报文经过的路径。一条 LSP 起始 LSR 叫入站的 LER，最后一台 LSR 叫出站的 LER，可以把一条 LSP 理解为一个单向的隧道。可以使用静态和动态两种方式来创建一条 LSP。
+
+如下图所示，这时假设左侧 IP 网络要访问右侧的 IP 网络，当报文进入 MPLS 域边界的 LSR 后被封装上标签（在原始 IP 报头之前），MPLS 网络中间的路由器只是根据交换标签信息来传递该报文（根据标签转发表把报文携带的标签替换成另一个标签）。当报文到达 MPLS 域另外一侧边界 LSR 时，数据包被解封装成原始的 IP 报文（移除标签），然后转发至 IP 网络。
+
+<div align="center">
+    <img src="mpls_static/2.png" width="550"/>
+</div>
+
+### 2.3 MPLS 标签格式
+
+在帧模式的 MPLS 网络中，标签位于报文的二层头部和三层头部之间，一个 MPLS 标签长度为 32bit，有固定的格式，如下图所示。
+
+<div align="center">
+    <img src="mpls_static/3.png" width="450"/>
+</div>
+
+**Label Value**：标签的前 20bit 表示标签值（标签的数字标识），所以标签值的范围为 0 到 1048575，但是，标签值 0 到 15 是特殊用途的标签，这里列举几个常见的特殊标签的用途，其他 0～15 之间的被保留标签的功能目前暂时没有定义。
+
+- 标签 0：IPv4 显式空标签；
+- 标签 1：路由器报警标签；
+- 标签 2：IPv6 显式空标签；
+- 标签 3：隐式空标签；
+
+**EXP**：EXP 是一个 3bit 的实验字段，之所以这么叫实验字段，是因为在 MPLS 设计之初还没确定该字段的作用，现在主要用来做 QoS。
+
+**S**：S 位叫栈底位（BoS，Bottom of Stack）。某些特殊应用场景（比如 MPLS VPN）下，需要一个 MPLS 报文携带多个标签（理论上可携带的标签数量是没有限制的）。这些标签组成一个堆栈，**<font color="red">堆栈底部的标签（紧挨着 IP 报头）S 位的值为 1，其他标签的 S 位的值都为 0</font>**，如下图所示。
+
+```java{.line-numbers}
+Ethernet II, Src: Huawe iTe_3d:2b:2a (00:e0:fc:3d:2b:2a), Dst: Huawe iTe_6e:7f:be (00:e0:fc:6e:7f:be)
+MultiProtocol Label Switching Header, Label: 1028, Exp: 0, S: 0, TTL: 254
+    MPLS Label: 1028
+    MPLS Experimental Bits: 0
+    MPLS Bottom of Label Stack: 0
+    MPLS TTL: 254
+MultiProtocol Label Switching Header, Label: 1025, Exp: 0, S: 1, TTL: 254
+    MPLS Label: 1025
+    MPLS Experimental Bits: 0
+    MPLS Bottom of Label Stack: 1
+    MPLS TTL: 254
+Internet Protocol, Src: 10.4.4.4 (10.4.4.4), Dst: 10.5.5.5 (10.5.5.5)
+Internet Control Message Protocol
+```
+
+**TTL**：最后 8bit 叫 TTL，作为报文的生存周期，作用跟 IP 报头中的 TTL 是一样的，**在 MPLS 网络中每进行一次标签交换操作，最外层标签中的 TTL 就减 1，TTL 一旦减为 0，报文就被丢弃，从而预防数据包的转发环路**。IP 报文进入 MPLS 网络后，标签的 TTL 值可以使用初始值 255，也可以直接拷贝 IP 头中的 TTL 值。
+
+### 2.4 LSP 的建立
+
+LSP 的建立分为静态和动态两种方法。动态 LSP 是使用标签分发协议（比如 LDP）建立的。静态 LSP 是由管理员手工配置的，**<font color="red">所以静态 LSP 不需要使用任何标签分发协议，没有必要交互任何控制信息</font>**，资源开销小。使用静态 LSP 还可以避免因为标签分发协议（比如 LDP）故障而导致 MPLS 业务流量丢失，所以静态 LSP 一般是用来保障关键应用的业务连续性。但是由于静态 LSP 是由手工配置的，无法自动适应网络拓扑的变化，当网络出现故障后还需要管理员干预，一般适用于小型网络。
+
+一条静态 LSP 经过的 LSR 共有 3 种角色：**`Ingress`**、**`Transit`**、**`Egress`**。Ingress 节点负责为接收到的 IP 报文压入标签并送入 LSP 隧道，Transit 节点负责以标签交换的方式转发报文，Egress 节点负责移除报文中的标签并将报文转发至 IP 网络。建立静态 LSP 时为各 LSR 手工分配标签时需要遵循的原则是：**<font color="red">前一节点（上游节点）出标签的值等于下一个节点（下游节点）入标签的值</font>**，具体要进行以下操作。
+
+- 在 Ingress 节点配置此 LSP 的目的地址、下一跳和出标签的值。
+- 在 Transit 节点配置此 LSP 的入接口、与上一节点出标签相等的入标签的值、对应的下一跳和出标签的值。
+- 在 Egress 节点配置此 LSP 的入接口及与上一节点出标签相等的入标签的值。
+
+如下图所示，PC1 与 PC2 之间通信的数据流需要经过中间的 MPLS 网络。**<font color="red">由于 LSP 是单向的隧道，要想实现 PC1 和 PC2 之间的双向通信，需要建立两条 LSP</font>**（图中的 LSP1 和 LSP2），LSP1 用于 PC1 到 PC2 方向的报文转发，LSP2 用于 PC2 到 PC1 方向的报文转发。
+
+LSP1 的 Ingress 节点为 LER1（出标签为 100）、Transit 节点为 LSR1（入标签为 100，出标签为 200）、Egress 节点为 LER2（入标签 200）。LSP2 的 Ingress 节点为 LER2（出标签为 300），Transit 节点为 LSR1（入标签为 300，出标签为 400），Egress 节点为 LER1（入标签为 400）。
+
+<div align="center">
+    <img src="mpls_static/4.png" width="600"/>
+</div>
+
+下面以上图拓扑为例，来演示配置 LSP1 和 LSP2 的具体配置过程如下所示：
+
+**（1）配置 LSP1**
+
+Ingress 的节点 LER1 配置如下，指定 LSP1 的 FEC 为 **`2.2.2.0/24`**，使用出标签 100 将报文转发至下一跳 **`10.1.12.2`**。
+
+```java{.line-numbers}
+[LER1]static-lsp ingress LSP1 destination 2.2.2.0 24 nexthop 10.1.12.2 out-label 100
+```
+
+Transit 节点配置如下，Transit 节点从接口 **`G0/0/0`** 接收到带有标签为 100 的报文，将标签替换为 200 后转发至下一跳 **`10.1.23.3`**。
+
+```java{.line-numbers}
+[LSR1]static-lsp transit LSP1 incoming-interface g0/0/0 in-label 100 nexthop 10.1.23.3 out-label 200
+```
+
+Egress 节点配置如下，Egress 节点从入口为 **`G0/0/0`** 接收到入标签为 200，移除标签后以 IP 的方式转发出去。
+
+```java{.line-numbers}
+[LER2]static-lsp egress LSP1 incoming-interface gi0/0/0 in-label 200
+```
+
+**（2）配置 LSP2**
+
+Ingress 节点配置如下所示：
+
+```java{.line-numbers}
+[LER2]static-lsp ingress LSP2 destination 1.1.1.0 24 nexthop 10.1.23.2 out-label 300
+```
+
+Transit 节点配置如下所示：
+
+```java{.line-numbers}
+[LSR1]static-lsp transit LSP2 incoming-interface gi0/0/1 in-label 300 nexthop 10.1.12.1 out-label 400
+```
+
+Egress 节点配置如下所示：
+
+```java{.line-numbers}
+[LER1]static-lsp egress LSP2 incoming-interface gi0/0/1 in-label 400
+```
+
+然后查看静态 LSP 的状态信息，如下输出所示：
+
+```java{.line-numbers}
+[LER1]display mpls static-lsp
+Name          FEC           I/O Label    I/O If          Status
+LSP1          2.2.2.0/24    NULL/100     -/GE0/0/1       Up
+LSP2          -/-           400/NULL     GE0/0/1/-       Up
+
+[LSR1]dis mpls static-lsp
+Name          FEC           I/O Label    I/O If                 Status
+LSP1          -/-           100/200      GE0/0/0/GE0/0/1        Up
+LSP2          -/-           300/400      GE0/0/1/GE0/0/0        Up
+
+[LER2]dis mpls static-lsp
+Name          FEC           I/O Label    I/O If          Status
+LSP1          -/-           200/NULL     GE0/0/0/-       Up
+LSP2          1.1.1.0/24    NULL/300     -/GE0/0/0       Up
+```
+
+上述状态信息中，**`I/O Label`** 表示静态 LSP 的入标签（In Label）和出标签（Out Label），其数值反映了设备在 MPLS 标签交换路径中的转发行为。当入标签为 NULL、出标签为具体数值时，表示设备作为 Ingress 节点，为进入 LSP 的报文压入指定标签（Push）。当入标签和出标签均为具体数值时，表示设备作为 Transit 节点，将收到的标签替换为新的标签（Swap）。当入标签为具体数值、出标签为 NULL 时，表示设备作为 Egress 节点，弹出当前 LSP 的标签（Pop）。
+
+本实验中，LSP1 的标签变化过程为 **`NULL/100->100/200->200/NULL`**，LSP2 的标签变化过程为 **`NULL/300->300/400->400/NULL`**。两条 LSP 的上下游标签均正确匹配，分别实现从 LER1 到 LER2、从 LER2 到 LER1 的单向标签交换。
+
+### 2.5 静态 LSP 案例 1
+
