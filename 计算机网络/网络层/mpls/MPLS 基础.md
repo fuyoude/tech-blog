@@ -195,3 +195,292 @@ LSP2          1.1.1.0/24    NULL/300     -/GE0/0/0       Up
 
 ### 2.5 静态 LSP 案例 1
 
+我们使用如下的拓扑图进行说明，用户之间（PC1-PC2）的 IP 业务流量在穿越 MPLS 域时，如果使用动态 LSP，假设用户最终使用的路径是 **`LER1-LSR1-LSR3-LER2`**，因为动态 LSP 的建立是依赖路由表（FEC）的，如果到目标的路由有发生变化，那么 LSP 使用的路径也会随着路由的变化而变化。如果用户要求业务流量走特定的一条路径，比如 **`LER1-LSR1-LSR2-LSR3-LER2`**，不管动态路由的切换路径如何，都使用该路径，除非该路径发生故障。
+
+<div align="center">
+    <img src="mpls_static/5.png" width="800"/>
+</div>
+
+在这种情况下就可以使用静态 LSP 来实现 PC1 和 PC2 之间通过 **`LER1-LSR1-LSR2-LSR3-LER2`** 的路径进行通信。管理员可以手工配置 LSP 的路径和标签，从而保证业务流量按照预期的路径转发。为此我们配置了两条静态 LSP，分别为 LSP1 和 LSP2。LSP1 用于 PC1 到 PC2 的单向通信，LSP2 用于 PC2 到 PC1 的单向通信。
+
+#### 2.5.1 正向静态 LSP：**`PC1 -> PC2`**
+
+正向静态 LSP 的目的 FEC 为 **`10.1.5.0/24`**，入口路由器为 AR1，出口路由器为 AR5。数据从 PC1 发往 PC2 时，AR1 首先为 IP 报文压入 MPLS 标签 100，随后经过 AR2、AR3、AR4 逐跳交换标签，最后由 AR5 弹出标签，将原始 IP 报文转发给 PC2。各节点的标签处理过程：
+
+- AR1（Ingress）：执行 Push 操作，为 IP 报文压入标签 100，下一跳为 **`10.1.12.2`**。
+- AR2（Transit）：执行 Swap 操作，将入标签 100 替换为出标签 200，下一跳为 **`10.1.23.3`**。
+- AR3（Transit）：执行 Swap 操作，将入标签 200 替换为出标签 300，下一跳为 **`10.1.34.4`**。
+- AR4（Transit）：执行 Swap 操作，将入标签 300 替换为出标签 400，下一跳为 **`10.1.45.5`**。
+- AR5（Egress）：执行 Pop 操作，弹出入标签 400，恢复原始 IP 报文，并根据 IP 路由表将其转发给 PC2。
+
+#### 2.5.2 反向静态 LSP：**`PC2 -> PC1`**
+
+反向静态 LSP 的目的 FEC 为 **`10.1.1.0/24`**，入口路由器为 AR5，出口路由器为 AR1。数据从 PC2 发往 PC1 时，AR5 首先压入 MPLS 标签 500，随后经过 AR4、AR3、AR2 逐跳交换标签，最后由 AR1 弹出标签并转发给 PC1。各节点的标签处理过程：
+
+- AR5（Ingress）：执行 Push 操作，为 IP 报文压入标签 500，下一跳为 **`10.1.45.4`**。
+- AR4（Transit）：执行 Swap 操作，将入标签 500 替换为出标签 600，下一跳为 **`10.1.34.3`**。
+- AR3（Transit）：执行 Swap 操作，将入标签 600 替换为出标签 700，下一跳为 **`10.1.23.2`**。
+- AR2（Transit）：执行 Swap 操作，将入标签 700 替换为出标签 800，下一跳为 **`10.1.12.1`**。
+- AR1（Egress）：执行 Pop 操作，弹出入标签 800，恢复原始 IP 报文，并根据 IP 路由表将其转发给 PC1。
+
+上述 2 条 LSP 的具体的配置如下所示：
+
+```java{.line-numbers}
+#
+sysname AR1
+#
+static-lsp ingress FWD destination 10.1.5.0 24 nexthop 10.1.12.2 out-label 100
+static-lsp egress REV incoming-interface GigabitEthernet0/0/0 in-label 800
+#
+sysname AR2
+#
+static-lsp transit FWD incoming-interface GigabitEthernet0/0/0 in-label 100 nexthop 10.1.23.3 out-label 200
+static-lsp transit REV incoming-interface GigabitEthernet0/0/1 in-label 700 nexthop 10.1.12.1 out-label 800
+#
+sysname AR3
+#
+static-lsp transit FWD incoming-interface GigabitEthernet0/0/1 in-label 200 nexthop 10.1.34.4 out-label 300
+static-lsp transit REV incoming-interface GigabitEthernet0/0/2 in-label 600 nexthop 10.1.23.2 out-label 700
+#
+sysname AR4
+#
+static-lsp transit FWD incoming-interface GigabitEthernet0/0/1 in-label 300 nexthop 10.1.45.5 out-label 400
+static-lsp transit REV incoming-interface GigabitEthernet0/0/2 in-label 500 nexthop 10.1.34.3 out-label 600
+#
+sysname AR5
+#
+static-lsp egress FWD incoming-interface GigabitEthernet0/0/0 in-label 400
+static-lsp ingress REV destination 10.1.1.0 24 nexthop 10.1.45.4 out-label 500
+```
+
+接下来分别在 5 台设备上检查静态 LSP 的状态信息：
+
+```java{.line-numbers}
+[AR1]display mpls static-lsp
+TOTAL          :	2       STATIC LSP(S)
+UP             :	2       STATIC LSP(S)
+DOWN           :	0       STATIC LSP(S)
+Name                FEC                I/O Label    I/O If                Status
+FWD                 10.1.5.0/24        NULL/100     -/GE0/0/0             Up    
+REV                 -/-                800/NULL     GE0/0/0/-             Up  
+[AR2]display mpls static-lsp
+TOTAL          :	2       STATIC LSP(S)
+UP             :	2       STATIC LSP(S)
+DOWN           :	0       STATIC LSP(S)
+Name                FEC                I/O Label    I/O If                Status
+FWD                 -/-                100/200      GE0/0/0/GE0/0/1       Up    
+REV                 -/-                700/800      GE0/0/1/GE0/0/0       Up  
+[AR3]display mpls static-lsp
+TOTAL          :	2       STATIC LSP(S)
+UP             :	2       STATIC LSP(S)
+DOWN           :	0       STATIC LSP(S)
+Name                FEC                I/O Label    I/O If                Status
+FWD                 -/-                200/300      GE0/0/1/GE0/0/2       Up    
+REV                 -/-                600/700      GE0/0/2/GE0/0/1       Up 
+[AR4]display mpls static-lsp
+TOTAL          :	2       STATIC LSP(S)
+UP             :	2       STATIC LSP(S)
+DOWN           :	0       STATIC LSP(S)
+Name                FEC                I/O Label    I/O If                Status
+FWD                 -/-                300/400      GE0/0/1/GE0/0/2       Up    
+REV                 -/-                500/600      GE0/0/2/GE0/0/1       Up  
+[AR5]display mpls static-lsp
+TOTAL          :	2       STATIC LSP(S)
+UP             :	2       STATIC LSP(S)
+DOWN           :	0       STATIC LSP(S)
+Name                FEC                I/O Label    I/O If                Status
+FWD                 -/-                400/NULL     GE0/0/0/-             Up    
+REV                 10.1.1.0/24        NULL/500     -/GE0/0/0             Up   
+```
+
+在 PC1 和 PC2 上分别使用 ping 命令测试两台主机之间的连通性，结果显示两台主机可以互相 ping 通，并且报文的传递路径确实为 **`PC1->AR1->AR2->AR3->AR4->AR5->PC2`**。
+
+```java{.line-numbers}
+PC>tracert 10.1.5.10
+traceroute to 10.1.5.10, 8 hops max
+(ICMP), press Ctrl+C to stop
+ 1  10.1.1.11   32 ms  15 ms  31 ms
+ 2  10.1.12.2   32 ms  47 ms  46 ms
+ 3  10.1.23.3   63 ms  62 ms  63 ms
+ 4  10.1.34.4   78 ms  94 ms  78 ms
+ 5  10.1.45.5   125 ms  109 ms  94 ms
+ 6  10.1.5.10   156 ms  125 ms  125 ms
+
+PC>ping 10.1.5.10
+Ping 10.1.5.10: 32 data bytes, Press Ctrl_C to break
+From 10.1.5.10: bytes=32 seq=1 ttl=123 time=109 ms
+From 10.1.5.10: bytes=32 seq=2 ttl=123 time=125 ms
+From 10.1.5.10: bytes=32 seq=3 ttl=123 time=141 ms
+From 10.1.5.10: bytes=32 seq=4 ttl=123 time=187 ms
+From 10.1.5.10: bytes=32 seq=5 ttl=123 time=141 ms
+
+--- 10.1.5.10 ping statistics ---
+  5 packet(s) transmitted
+  4 packet(s) received
+  20.00% packet loss
+  round-trip min/avg/max = 0/148/187 ms
+```
+
+为了进一步确认 PC1 与 PC2 之间的业务报文确实通过 MPLS 静态 LSP 进行转发，在 AR1 的 **`G0/0/0`** 口上抓取数据包，该链路同时承载正向 LSP 进入 MPLS 域的报文，以及反向 LSP 到达 AR1 出口节点之前的报文。结果如下所示，PC1 发往 PC2 的报文在进入 MPLS 网络时被压入标签 100，从 PC2 返回 PC1 的 ICMP 报文在到达 AR1 之前，仍然携带 MPLS 标签 800。
+
+```java{.line-numbers}
+Frame 23: 78 bytes on wire (624 bits), 78 bytes captured (624 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_92:59:9d (54:89:98:92:59:9d), Dst: HuaweiTe_d3:7e:bb (54:89:98:d3:7e:bb)
+MultiProtocol Label Switching Header, Label: 100, Exp: 0, S: 1, TTL: 127
+    0000 0000 0000 0110 0100 .... .... .... = MPLS Label: 100 (0x00064)
+    .... .... .... .... .... 000. .... .... = MPLS Experimental Bits: 0
+    .... .... .... .... .... ...1 .... .... = MPLS Bottom Of Label Stack: 1
+    .... .... .... .... .... .... 0111 1111 = MPLS TTL: 127
+Internet Protocol Version 4, Src: 10.1.1.10, Dst: 10.1.5.10
+Internet Control Message Protocol
+
+Frame 25: 78 bytes on wire (624 bits), 78 bytes captured (624 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_d3:7e:bb (54:89:98:d3:7e:bb), Dst: HuaweiTe_92:59:9d (54:89:98:92:59:9d)
+MultiProtocol Label Switching Header, Label: 800, Exp: 0, S: 1, TTL: 124
+    0000 0000 0011 0010 0000 .... .... .... = MPLS Label: 800 (0x00320)
+    .... .... .... .... .... 000. .... .... = MPLS Experimental Bits: 0
+    .... .... .... .... .... ...1 .... .... = MPLS Bottom Of Label Stack: 1
+    .... .... .... .... .... .... 0111 1100 = MPLS TTL: 124
+Internet Protocol Version 4, Src: 10.1.5.10, Dst: 10.1.1.10
+Internet Control Message Protocol
+```
+
+### 2.6 静态 LSP 案例 2
+
+现在将上述拓扑中 AR2 与 AR4 之间链路的 OSPF Cost 调整为 1，其余链路的 OSPF Cost 保持不变，同时不修改已配置的静态 LSP。通过这一实验，观察当 OSPF 最优路径发生变化时，静态 LSP 是否仍然按照手工指定的路径进行标签转发。
+
+<div align="center">
+    <img src="mpls_static/6.png" width="800"/>
+</div>
+
+通过查看 AR1、AR2 和 AR4 的 IP 路由表，可以发现 AR1 到目的网段 **`10.1.5.0/24`** 的 OSPF 最优下一跳仍然是 AR2，而 AR2 到该网段的最优下一跳已经变为 AR4。因此，如果按照普通 IP 路由表逐跳转发，PC1 访问 PC2 的最优路径应为 **`AR1->AR2->AR4->AR5`**，而手工配置的静态 LSP 路径仍然是 **`AR1->AR2->AR3->AR4->AR5`**。相关路由表项如下所示：
+
+```java{.line-numbers}
+<AR1>display ip routing-table 10.1.5.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.5.0/24  OSPF    10   4           D   10.1.12.2       GigabitEthernet0/0/0
+<AR2>display ip routing-table 10.1.5.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.5.0/24  OSPF    10   3           D   10.1.24.4       GigabitEthernet0/0/2
+<AR4>display ip routing-table 10.1.5.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.5.0/24  OSPF    10   2           D   10.1.45.5       GigabitEthernet0/0/2
+```
+
+此时，**<font color="red">在 AR2 上存在两种不同的转发信息：一种是普通 IP 转发所使用的 IP 转发表（FIB），另一种是 MPLS 标签转发所使用的标签转发表（LFIB）</font>**。当 AR2 收到尚未携带 MPLS 标签的普通 IP 报文时，通常会根据 IP 转发表确定转发下一跳。而当 AR2 收到携带入标签 100 的 MPLS 报文时，则会根据本地标签转发表执行标签交换操作，按照静态 LSP 配置将报文转发给 AR3。**<font color="red">因此，在静态 LSP 的 Transit 节点上，管理员手工指定的 nexthop 可以与本地到目的 FEC 的最优 IP 路由下一跳不一致</font>**。
+
+接下来，在 PC1 上分别使用 ping 和 tracert 命令测试 PC2 的连通性及实际转发路径。结果显示两台主机可以互相 ping 通，并且报文的传递路径确实为 **`PC1->R1->R2->R3->R4->R5->PC2`**，这说明**静态 LSP 能够在相关生效条件满足的情况下，使业务流量沿指定的标签交换路径转发，而不必与各 Transit 节点计算出的最优 IP 路由路径保持一致**。
+
+```java{.line-numbers}
+PC>ping 10.1.5.10
+
+Ping 10.1.5.10: 32 data bytes, Press Ctrl_C to break
+From 10.1.5.10: bytes=32 seq=1 ttl=123 time=109 ms
+From 10.1.5.10: bytes=32 seq=2 ttl=123 time=141 ms
+From 10.1.5.10: bytes=32 seq=3 ttl=123 time=140 ms
+From 10.1.5.10: bytes=32 seq=4 ttl=123 time=140 ms
+From 10.1.5.10: bytes=32 seq=5 ttl=123 time=141 ms
+
+--- 10.1.5.10 ping statistics ---
+  5 packet(s) transmitted
+  5 packet(s) received
+  0.00% packet loss
+  round-trip min/avg/max = 109/134/141 ms
+
+PC>tracert 10.1.5.10
+
+traceroute to 10.1.5.10, 8 hops max
+(ICMP), press Ctrl+C to stop
+ 1  10.1.1.11   16 ms  15 ms  32 ms
+ 2  10.1.12.2   46 ms  32 ms  47 ms
+ 3  10.1.23.3   62 ms  63 ms  62 ms
+ 4  10.1.34.4   78 ms  94 ms  78 ms
+ 5  10.1.45.5   109 ms  110 ms  94 ms
+ 6  10.1.5.10   125 ms  125 ms  125 ms
+```
+
+### 2.7 静态 LSP 案例 3
+
+接下来，我们以案例 1 的原始拓扑为基础，将 **`AR1—AR3`** 链路的 OSPF Cost 调整为 1，其余链路的 OSPF Cost 保持不变。同时，不修改此前已经配置的静态 LSP。通过本次实验，进一步观察当 Ingress 节点到目的 FEC 的最优 IP 路由下一跳发生变化时，静态 LSP 的实际转发行为。
+
+<div align="center">
+    <img src="mpls_static/7.png" width="800"/>
+</div>
+
+通过查看 AR1、AR3 和 AR4 的 IP 路由表，可以发现 AR1 到目的网段 **`10.1.5.0/24`** 的 OSPF 最优下一跳已经由 AR2 变为 AR3，而 AR3 到该网段的最优下一跳为 AR4。因此，如果按照普通 IP 路由表逐跳转发，PC1 访问 PC2 的最优路径应为 **`AR1->AR3->AR4->AR5`**，而此前手工配置的静态 LSP 路径仍然是 **`AR1->AR2->AR3->AR4->AR5`**。相关路由表项如下所示：
+
+```java{.line-numbers}
+[AR1]display ip routing-table 10.1.5.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.5.0/24  OSPF    10   4           D   10.1.13.3       GigabitEthernet0/0/1
+[AR3]display ip routing-table 10.1.5.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.5.0/24  OSPF    10   3           D   10.1.34.4       GigabitEthernet0/0/2
+[AR4]display ip routing-table 10.1.5.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+       10.1.5.0/24  OSPF    10   2           D   10.1.45.5       GigabitEthernet0/0/2
+```
+
+接下来，在 PC1 上分别使用 ping 和 tracert 命令测试 PC2 的连通性及实际转发路径。结果显示两台主机可以互相 ping 通，同时，Tracert 结果显示，报文的实际转发路径为 **`PC1->AR1->AR3->AR4->AR5->PC2`**，与当前 OSPF 计算出的最优 IP 路径一致，而不再经过原静态 LSP 路径中的 AR2。
+
+```java{.line-numbers}
+PC>tracert 10.1.5.10
+traceroute to 10.1.5.10, 8 hops max
+(ICMP), press Ctrl+C to stop
+ 1  10.1.1.11   31 ms  16 ms  16 ms
+ 2  10.1.13.3   46 ms  47 ms  47 ms
+ 3  10.1.34.4   63 ms  62 ms  78 ms
+ 4  10.1.45.5   110 ms  78 ms  78 ms
+ 5    *10.1.5.10   109 ms  125 ms
+
+PC>ping 10.1.5.10
+Ping 10.1.5.10: 32 data bytes, Press Ctrl_C to break
+From 10.1.5.10: bytes=32 seq=1 ttl=123 time=125 ms
+From 10.1.5.10: bytes=32 seq=2 ttl=123 time=156 ms
+From 10.1.5.10: bytes=32 seq=3 ttl=123 time=140 ms
+From 10.1.5.10: bytes=32 seq=4 ttl=123 time=188 ms
+From 10.1.5.10: bytes=32 seq=5 ttl=123 time=203 ms
+--- 10.1.5.10 ping statistics ---
+  5 packet(s) transmitted
+  5 packet(s) received
+  0.00% packet loss
+  round-trip min/avg/max = 125/162/203 ms
+```
+
+但是，在 AR1 的 **`G0/0/1`** 接口上抓取数据包后发现，PC1 发往 PC2 的报文并未携带 MPLS 标签，而是以普通 IPv4 报文的形式发送给 AR3。这说明 **<font color="red">虽然静态 LSP 不依赖动态路由，但是在 LSP 的 Ingress 节点处，LSP 对应的 FEC 在本地路由表中需要存在相应的路由前缀，为 LSP 指定的下一跳也要和本地路由表一致</font>**。当这些条件不再满足时，原静态 LSP 可能无法正常生效，但只要普通 IP 路由仍然可达，业务报文就可能通过普通 IP 转发继续到达目的网络。
+
+在本次实验的抓包结果中，PC1 发往 PC2 的 ICMP 报文直接封装在以太网帧中的 IPv4 协议内，没有出现 MPLS 标签头。
+
+```java{.line-numbers}
+Frame 44: 74 bytes on wire (592 bits), 74 bytes captured (592 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_92:59:9e (54:89:98:92:59:9e), Dst: HuaweiTe_53:2b:ae (54:89:98:53:2b:ae)
+Internet Protocol Version 4, Src: 10.1.1.10, Dst: 10.1.5.10
+Internet Control Message Protocol
+```
+
+### 2.8 静态 LSP 案例 4
+
