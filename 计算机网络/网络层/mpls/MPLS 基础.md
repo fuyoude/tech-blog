@@ -484,3 +484,85 @@ Internet Control Message Protocol
 
 ### 2.8 静态 LSP 案例 4
 
+我们使用如下所示拓扑图来展示静态 LSP 的最后一个案例。
+
+<div align="center">
+    <img src="mpls_static/8.png" width="800"/>
+</div>
+
+#### 2.8.1 两条正向静态 LSP
+
+**（1）正向静态 LSP1：`FWD_S1`**
+
+**`FWD_S1`** 的目的 FEC 为 **`10.1.44.0/24`**，AR1 为 Ingress，AR2 为 Transit，AR4 为 Egress。当 PC1 向 PC3 发送 IP 报文时，AR1 根据目的 FEC 匹配静态 LSP，执行 **Push** 操作，压入标签 **`100`** 并发送给 AR2。AR2 收到报文后，根据标签转发表执行 **Swap** 操作，将标签 **`100`** 替换为 **`300`**，并转发给 AR4。最后，AR4 执行 **Pop** 操作，弹出标签 **`300`**，将原始 IP 报文转发给 PC3。**转发路径及标签变化：`PC1 -> AR1（Push 100）-> AR2（Swap 100,300）-> AR4（Pop 300）-> PC3`**
+
+**（2）正向静态 LSP2：`FWD_S2`**
+
+**`FWD_S2`** 的目的 FEC 同样为 **`10.1.44.0/24`**，AR3 为 Ingress，AR2 为 Transit，AR4 为 Egress。当 PC2 向 PC3 发送 IP 报文时，AR3 执行 **Push** 操作，压入标签 **`200`** 并发送给 AR2。AR2 根据入标签 **`200`** 查找标签转发表，执行 **Swap** 操作，将标签 **`200`** 替换为 **`300`**，并转发给 AR4。最后，AR4 执行 **Pop** 操作，弹出标签 **`300`**，将原始 IP 报文转发给 PC3。**转发路径及标签变化：`PC2 -> AR3（Push 200）-> AR2（Swap 200,300）-> AR4（Pop 300）-> PC3`**。
+
+根据 RFC 3031，标签汇聚的定义是：the replacement of multiple incoming labels for a particular FEC with a single outgoing label. 具体的工作原理为：Let us say that an LSR is capable of label merging if it can receive two packets from different incoming interfaces, and/or with different labels, and send both packets out the same outgoing interface with the same label. Once the packets are transmitted, the information that they arrived from different interfaces and/or with different incoming labels is lost.
+
+在我们的例子中，**不同的入标签在 AR2 上被交换为相同的出标签，并使用相同的下一跳进行转发**。它允许多个上游分支共用同一段下游标签转发路径，从整体上形成多点到点的 LSP 树。两条正向的 LSP 的示意图如下所示：
+
+<div align="center">
+    <img src="mpls_static/9.png" width="550"/>
+</div>
+
+## 2.2 两条反向静态 LSP
+
+由于普通 MPLS LSP 是单向的，上述拓扑图还配置了 **`REV_S1`** 和 **`REV_S2`** 两条反向静态 LSP，分别用于 PC3 访问 PC1 和 PC2。
+
+**（1）反向静态 LSP1：`REV_S1`**
+
+**`REV_S1`** 的目的 FEC 为 **`10.1.11.0/24`**。当 PC3 向 PC1 发送 IP 报文时，AR4 执行 **Push** 操作，压入标签 **`400`** 并发送给 AR2。AR2 执行 **Swap** 操作，将标签 **`400`** 替换为 **`600`**，并转发给 AR1。最后，AR1 执行 **Pop** 操作，弹出标签 **`600`**，将原始 IP 报文转发给 PC1。
+
+**（2）反向静态 LSP2：`REV_S2`**
+
+**`REV_S2`** 的目的 FEC 为 **`10.1.33.0/24`**。当 PC3 向 PC2 发送 IP 报文时，AR4 执行 **Push** 操作，压入标签 **`500`** 并发送给 AR2。AR2 执行 **Swap** 操作，将标签 **`500`** 替换为 **`700`**，并转发给 AR3。最后，AR3 执行 **Pop** 操作，弹出标签 **`700`**，将原始 IP 报文转发给 PC2。
+
+反向静态 LSP 的示意图如下所示：
+
+<div align="center">
+    <img src="mpls_static/10.png" width="550"/>
+</div>
+
+上述拓扑图中的 AR1-AR4 的静态 LSP 配置和 LSP 信息如下所示：
+
+```java{.line-numbers}
+// AR1
+static-lsp ingress FWD_S1 destination 10.1.44.0 24 nexthop 10.1.12.2 out-label 100
+static-lsp egress REV_S1 incoming-interface GigabitEthernet0/0/1 in-label 600
+// AR3
+static-lsp ingress FWD_S2 destination 10.1.44.0 24 nexthop 10.1.23.2 out-label 200
+static-lsp egress REV_S2 incoming-interface GigabitEthernet0/0/1 in-label 700
+// AR2
+static-lsp transit FWD_S1 incoming-interface GigabitEthernet0/0/0 in-label 100 nexthop 10.1.24.4 out-label 300
+static-lsp transit FWD_S2 incoming-interface GigabitEthernet0/0/1 in-label 200 nexthop 10.1.24.4 out-label 300
+static-lsp transit REV_S1 incoming-interface GigabitEthernet0/0/2 in-label 400 nexthop 10.1.12.1 out-label 600
+static-lsp transit REV_S2 incoming-interface GigabitEthernet0/0/2 in-label 500 nexthop 10.1.23.3 out-label 700
+// AR4
+static-lsp egress FWD_MERGE incoming-interface GigabitEthernet0/0/0 in-label 300
+static-lsp ingress REV_S1 destination 10.1.11.0 24 nexthop 10.1.24.2 out-label 400
+static-lsp ingress REV_S2 destination 10.1.33.0 24 nexthop 10.1.24.2 out-label 500
+
+[AR1]display mpls static-lsp 
+Name                FEC                I/O Label    I/O If                Status
+FWD_S1              10.1.44.0/24       NULL/100     -/GE0/0/1             Up    
+REV_S1              -/-                600/NULL     GE0/0/1/-             Up  
+[AR2]display mpls static-lsp 
+Name                FEC                I/O Label    I/O If                Status
+FWD_S1              -/-                100/300      GE0/0/0/GE0/0/2       Up    
+FWD_S2              -/-                200/300      GE0/0/1/GE0/0/2       Up    
+REV_S1              -/-                400/600      GE0/0/2/GE0/0/0       Up    
+REV_S2              -/-                500/700      GE0/0/2/GE0/0/1       Up 
+[AR3]display mpls static-lsp 
+Name                FEC                I/O Label    I/O If                Status
+FWD_S2              10.1.44.0/24       NULL/200     -/GE0/0/1             Up    
+REV_S2              -/-                700/NULL     GE0/0/1/-             Up 
+[AR4]display mpls static-lsp 
+Name                FEC                I/O Label    I/O If                Status
+FWD_MERGE           -/-                300/NULL     GE0/0/0/-             Up    
+REV_S1              10.1.11.0/24       NULL/400     -/GE0/0/0             Up    
+REV_S2              10.1.33.0/24       NULL/500     -/GE0/0/0             Up  
+```
+
