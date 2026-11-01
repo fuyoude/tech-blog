@@ -18,7 +18,7 @@ NHLFE 可以通过 ILM 或 FTN 找到，因此 ILM 和 FTN 负责查找对应的
 
 根据 RFC 3031 中对 ILM 的描述，The "Incoming Label Map" (ILM) maps each incoming label to a set of NHLFEs.  It is used when forwarding packets that arrive as labeled packets. 当 LSR 收到一个已经携带 MPLS 标签的报文时，典型情况下由 Transit 节点根据报文栈顶的入标签查询 ILM，找到对应的 NHLFE，再根据其中规定的操作执行 Swap、Pop 或其他标签栈处理，并将报文转发给指定的下一跳。
 
-### 1.2 华为 MPLS 转发表的实现（动态 LDP）
+### 1.2 华为动态 LDP MPLS 转发的实现
 
 #### 1.2.1 网络拓扑
 
