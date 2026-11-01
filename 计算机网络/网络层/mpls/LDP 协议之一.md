@@ -196,9 +196,147 @@ Destination/Mask   Nexthop         Flag  TimeStamp     Interface      TunnelID
 
 ### 2.1 LDP 的基本概念
 
+LDP 协议在 RFC3036 中被定义，在 MPLS 网络中，**<font color="red">路由器通过运行 LDP 协议为每条内部路由映射一个标签，然后再将标签信息通告给所有邻居，路由器之间通过这种方式来建立标签转发表，最终形成 LSP</font>**，当网络拓扑发生变化时，LDP 还会实时地响应这种变化，动态建立 LSP。
 
+#### 2.1.1 标签空间
 
+LDP 分配标签的空间有两种。
 
+基于接口的标签空间：每个接口通告的标签范围是唯一的，如下图所示，LER1 为同一条 FEC 在不同接口通告的标签是不同的。
+
+<div align="center">
+    <img src="mpls_static/13.png" width="350"/>
+</div>
+
+基于平台的标签空间：标签分配时并不是在每个接口下唯一，而是从整台 LSR 中来分配标签的，如下图所示，LER1 为同一条 FEC 通告一个标签。
+
+<div align="center">
+    <img src="mpls_static/14.png" width="400"/>
+</div>
+
+下面显示了华为设备默认使用的标签空间，**位于 LSR-ID 后面的数字 0 表示华为默认采用的标签空间是基于平台的**，如下输出所示。
+
+```java{.line-numbers}
+[AR1]display mpls ldp session
+PeerID          Status      LAM   SsnRole   SsnAge        KASent/Rcv
+10.1.2.2:0      Operational DU    Passive   0000:00:00    1/1
+TOTAL: 1 session(s) Found.
+```
+
+#### 2.1.2 上游 LSR 和下游 LSR
+
+<div align="center">
+    <img src="mpls_static/15.png" width="650"/>
+</div>
+
+上游和下游是根据数据报文的流向来定义的，**<font color="red">数据流总是由上游发往下游</font>**，如上图所示，对于网络 **`172.16.1.0/24`** 来说，LSR3 是最后一跳路由器，其上游是 LSR2，而 LSR2 同时又是 LSR1 的下游。标签的通告方向可以是下游通告给上游，上游也可以将其标签通告给下游。
+
+#### 2.1.3 PHP（倒数第二跳弹出）
+
+在 MPLS 网络的出站 LER 处，首先需要对接收的报文进行标签移除（通过查找标签转发表），然后再进行 FIB 表的查找并转发，由于进行了两次查表操作，所以过程比较耗时。如果到达出站 LER 的流量较大，会对设备性能造成一定的影响。为减轻出站 LER 的负担，**<font color="red">标签在到达出站 LER 之前就被弹出，这样在报文到达出站 LER 时已经是 IP 报文了</font>**，只需要查找 IP 转发表就转发出去。
+
+为使标签在到达出站 LER 之前就被弹出，使用了一个特殊的标签 3，这个标签也叫隐式空标签，如下图所示。
+
+<div align="center">
+    <img src="mpls_static/16.png" width="600"/>
+</div>
+
+在上图所示的场景中，对于网络 **`172.16.1.0/24`** 来说，LSR3 作为最后一跳路由器，向上游邻居 LSR2 通告一个标签值为 3 的标签，当 LSR2 接收到去往该目标网络的报文（带有标签值为 1024 的报文）时，会将 1024 标签进行弹出操作后再转发至下游邻居 LSR3，也就是说，3 号标签实际上是代表一种弹出操作，而不是实际需要携带的标签，所以叫隐式空标签。
+
+### 2.2 LDP 的报文
+
+LDP 报文是基于 TCP 的（Hello 报文基于 UDP），端口号为 646，并且报文格式是基于 TLV 的方式来封装的，LDP 报文分为头部和报文内容两部分，LDP 报头格式如下图所示。
+
+<div align="center">
+    <img src="mpls_static/17.png" width="450"/>
+</div>
+
+- Version：2Byte 无符号整数值，**<font color="red">表示 LDP 协议版本号，目前 LDP 协议版本号为 `0x01`</font>**。
+- PDU Length：2Byte 整数值，以字节为单位表示 PDU 长度，不包括版本号和 PDU 长度字段。PDU 最大长度在会话初始化时协商确定，默认最大长度为 4096Byte。在 LDP 中，PDU（协议数据单元）就是 LDP 协议组织和封装消息的基本单位。它由一个 LDP 头部和一个或多个 LDP 消息组成。LDP Message 则负责承载 Hello、Label Mapping、Label Request 等具体协议消息。
+- LDP Identifier：6Byte，唯一标识 PDU 所属发送 LSR 的标签空间。**<font color="red">前 4Byte 表示 LSR-ID 地址，后 2Byte 指定 LSR 中的特定标签空间</font>**。
+
+LDP 报文格式如下图所示，对其中的字段解释如下：
+
+<div align="center">
+    <img src="mpls_static/18.png" width="450"/>
+</div>
+
+- U：1bit，未知 TLV bit，主要用于告诉接收方如果收到一条自己无法识别的 LDP 消息，应该向发送方报告错误，还是直接忽略这条消息。如果 U=0 的话，接收方无法识别时，向发送方返回 Notification 消息。如果 U=1 的话，接收方无法识别时，直接忽略该未知消息。
+- **`Message Type`**：14bit，表示报文所属的类型。
+- **`Message Length`**：2Byte，以字节为单位表示报文长度，包括报文标识符、必选参数、可选参数等几部分。
+- **`Message ID`**：报文标识符，4Byte，用于标识报文。
+- **`Mandatory Parameters`**：必选参数可变长度，必选参数集。
+- **`Option Parameters`**：可选参数可变长度，可选参数集。
+
+### 2.3 Hello 报文
+
+LDP 的 Hello 报文用于发现邻居并用作后期邻居关系的维护，基于 UDP 来发送，发送的目标地址是 **`224.0.0.2`**，在启用了 LDP 的接口上会周期性地发送（默认周期=5s）。
+
+在邻居发现阶段，LDP 通过 UDP 646 端口发送 Hello 报文，其中普通 Link Hello 使用组播方式发送，IPv4 目的组播地址为 **`224.0.0.2`**，主要用于发现和维护直连 LDP 邻居。而 Targeted Hello 则采用 UDP 单播方式，用于发现指定的 LDP 邻居，包括非直连邻居。完成邻居发现后，LSR 通过 TCP 646 端口建立 LDP 会话，并利用 TCP 连接可靠地传输 Initialization、KeepAlive、Label Mapping 等协议消息。
+
+Hello 包携带了一些通用参数，比如保持时间等，还有发送方的传输地址。保持时间是删除一个邻居前的等待时间，默认是 15s（**`Hello*3`**），如果双方设置的保持时间不一样，则使用较短的那个时间。**<font color="red">传输地址是用来建立 TCP 连接的地址，默认是跟 LSR-ID 一样的，所以默认情况下，两台 LSR 要能成功建立 LDP 邻居会话关系，各自的 LSR-ID 一定要路由可达</font>**。
+
+可以使用下面的方式来查看保持时间和传输地址，如下输出所示。
+
+```java{.line-numbers}
+[LSR1]display mpls ldp interface verbose
+LDP Interface Information in Public Network
+
+Interface Name : GigabitEthernet0/0/0
+LDP ID         : 10.1.1.1:0     Transport Address : 10.1.1.1
+Entity Status  : Active         Effective MTU     : 1500
+
+Configured Hello Hold Timer    : 15 Sec
+Negotiated Hello Hold Timer    : 15 Sec
+```
+
+### 2.4 Initialization 报文
+
+Initialization 报文用来协商 LDP 邻居会话参数，包括标签的分发方式、防环机制和标签空间。
+
+### 2.5 Address 报文
+
+**<font color="red">Address 报文用来向 LDP 邻居通告本端的所有接口 IP 地址</font>**，以便邻居可以通过 IP 转发表的下一跳地址来决定出站标签。
+
+LDP Address 消息主要用于向 LDP 邻居通告本设备的接口 IP 地址，**<font color="red">使邻居能够建立下一跳 IP 地址与 LDP 对等体之间的对应关系</font>**。当路由器需要为某个 FEC 选择出标签时，首先根据 IP 路由表确定下一跳地址，再通过 Address 消息学习到的地址映射找到对应的 LDP 邻居，**最后从 LIB 中选择该邻居针对这个 FEC 发布的标签，作为 MPLS 转发使用的出标签**。
+
+### 2.6 Keepalive 报文
+
+LDP 邻居会话建立后，双方会定期地交互 KeepAlive 报文，用来对 TCP 会话的保活检测，默认检测周期为 15s，超时时间为 45s。KeepAlive 报文没有具体内容，格式非常简单。
+
+### 2.7 Notification 报文
+
+通知报文分为错误通知或查询通知。在发生以下事件时会发出通知报文：收到的数据包格式错误、无法识别的 TLV、会话超时时等，报文中会向邻居报告具体的差错类型。
+
+## 3.LDP 标签的发布和管理
+
+LDP 会话建立后，LDP 协议开始交换标签映射等报文，用于建立 LSP。RFC3036 分别定义了标签发布方式、标签分配的控制方式、标签保持方式来决定 LSR 如何发布和管理标签。
+
+### 3.1 标签发布方式
+
+标签发布方式是指下游 LSR 发布标签映射通告时，**<font color="red">采取主动出击或在收到上游 LSR 请求后被动回应</font>**，也就是分为 DU（Downstream Unsolicited）和 DoD（Downstream On Demand）两种方式。
+
+#### 3.1.1 DU 下游自主
+
+在 DU 模式下，**<font color="red">当下游 LSR 和上游 LSR 建立完 LDP 会话后，下游主动向上游发布标签映射通告报文</font>**，华为 VRP 系统中默认就采用该模式。但是，华为默认情况下只对路由表中的 32 位掩码路由进行标签映射并通告，如果想要修改触发标签的策略，可以使用 Lsp-Trigger 命令修改。
+
+如图所示，以 **`171.68.1.0/24`** 为例，LSR3 路由器主动向其上游邻居 LSR2 通告标签映射信息，同时，LSR2 也会主动向 LSR1 通告自己的标签映射。
+
+<div align="center">
+    <img src="mpls_static/19.png" width="550"/>
+</div>
+
+一般情况下，LSR 会向其上游和下游 LDP 邻居都通告标签，从而提高 LDP LSP 的收敛速度。但是向所有对等体发送标签映射报文会导致大量 LSP 的建立，占用较多的资源。因此，为了减少 LSP 的数量，从而节省内存，推荐使用 **`outbound peer { peer-id | all } split-horizon`** 命令为 LDP 邻居配置水平分割策略，**<font color="red">即控制 LSR 只向其上游 LDP 邻居分配标签</font>**。参数 **`peer-id`** 用来配置不给指定 LSR ID 的下游 LDP 邻居分配标签。如果配置参数 all 的同时又配置 peer-id，则单个 peer 的 LDP 水平分割策略不生效。默认情况下，华为设备上没有启用该配置。
+
+#### 3.1.2 DoD 下游按需
+
+下游 LSR 如果工作在 DoD 模式下时，在收到上游 LSR 的标签请求报文后，会针对上游 LSR 所请求的 FEC 发送对应的标签映射信息给上游 LSR，如图所示，所有 LSR 都工作在 DoD 模式下，LSR1 向 LSR2 发送标签请求，LSR2 也向 LSR3 发送标签请求，LSR3 会将 **`FEC:171.68.1.0/24`** 及映射的标签回应给 LSR2，LSR2 也会向 LSR1 回应自己分配的标签信息。
+
+<div align="center">
+    <img src="mpls_static/20.png" width="550"/>
+</div>
+
+## 3.分类
 
 DU：Downstream Unsolicited（下游自主分发）
 
