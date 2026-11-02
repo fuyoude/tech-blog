@@ -328,6 +328,8 @@ LDP 会话建立后，LDP 协议开始交换标签映射等报文，用于建立
 
 一般情况下，LSR 会向其上游和下游 LDP 邻居都通告标签，从而提高 LDP LSP 的收敛速度。但是向所有对等体发送标签映射报文会导致大量 LSP 的建立，占用较多的资源。因此，为了减少 LSP 的数量，从而节省内存，推荐使用 **`outbound peer { peer-id | all } split-horizon`** 命令为 LDP 邻居配置水平分割策略，**<font color="red">即控制 LSR 只向其上游 LDP 邻居分配标签</font>**。参数 **`peer-id`** 用来配置不给指定 LSR ID 的下游 LDP 邻居分配标签。如果配置参数 all 的同时又配置 peer-id，则单个 peer 的 LDP 水平分割策略不生效。默认情况下，华为设备上没有启用该配置。
 
+DU 模式的核心是下游 LSR 不需要收到上游的 Label Request，就可以主动发送 Label Mapping 消息。需要注意，DU 并不意味着下游设备不考虑任何条件就分配所有标签。它能否向上游发布某个 FEC 的标签，还受到标签分配控制模式（Independent 或 Ordered）等因素的约束。
+
 #### 3.1.2 DoD 下游按需
 
 下游 LSR 如果工作在 DoD 模式下时，在收到上游 LSR 的标签请求报文后，会针对上游 LSR 所请求的 FEC 发送对应的标签映射信息给上游 LSR，如图所示，所有 LSR 都工作在 DoD 模式下，LSR1 向 LSR2 发送标签请求，LSR2 也向 LSR3 发送标签请求，LSR3 会将 **`FEC:171.68.1.0/24`** 及映射的标签回应给 LSR2，LSR2 也会向 LSR1 回应自己分配的标签信息。
@@ -336,29 +338,90 @@ LDP 会话建立后，LDP 协议开始交换标签映射等报文，用于建立
     <img src="mpls_static/20.png" width="550"/>
 </div>
 
-## 3.分类
+DoD 模式的核心是上游 LSR 需要标签时，先向下游发送 Label Request。下游收到请求后，才向上游发布对应的 Label Mapping。可以通过下面的方法修改默认的标签发布方式，如下所示。
 
-DU：Downstream Unsolicited（下游自主分发）
+```java{.line-numbers}
+[LSR1-GigabitEthernet0/0/0]mpls ldp advertisement dod
+```
 
-DU 模式的核心是：下游 LSR 不需要收到上游的 Label Request，就可以主动发送 Label Mapping 消息。
+### 3.2 标签分配的控制方式
 
-在 LDP 邻居关系建立后，下游设备可以为 FEC 建立标签绑定，并将该绑定主动通告给上游。上游收到标签映射后，根据自己的路由信息判断应该使用哪一个 LDP 邻居提供的标签。
+标签分配的控制是指下游给上游发布标签时（不管是主动还是被动）的条件，**<font color="red">也就是下游 LSR 在向上游 LSR 发布标签时是否被要求一定要收到自己下游 LSR 的标签</font>**。标签控制方式分为两种：独立控制方式和有序控制方式。
 
-需要注意，DU 并不意味着下游设备不考虑任何条件就分配所有标签。它能否向上游发布某个 FEC 的标签，还受到标签分配控制模式（Independent 或 Ordered）、标签发布策略等因素的约束
+#### 3.2.1 独立控制方式
 
-DoD：Downstream on Demand（下游按需分发）
+在独立控制方式下，**<font color="red">LSR 在没有收到自己下游 LSR 的情况下就能向上游通告标签映射信息</font>**。这里分为两种情况：下游 LSR 的标签分发方式如果为 DU，下游直接将标签映射通告给上游；下游 LSR 的标签分发方式如果是 DoD，那么在收到上游 LSR 的标签请求后直接向其上游 LSR 回应标签信息，不管它自己有没有收到下游 LSR 的标签。所以在独立控制模式下，LSR 的标签通告行为比较自主，如下图所示。
 
-DoD 模式的核心是：上游 LSR 需要标签时，先向下游发送 Label Request；下游收到请求后，才向上游发布对应的 Label Mapping。
+<div align="center">
+    <img src="mpls_static/21.png" width="550"/>
+</div>
 
-DoD 并不代表每次转发 IP 报文都要重新请求标签。Label Request 是 LDP 控制平面建立标签绑定关系时使用的协议消息，已经建立的 LSP 可以持续转发大量数据报文。
+如上图所示，LSR2 工作在独立控制模式下，相对于目标网段 **`172.16.1.0/24`** 来说，LSR1 是其上游邻居，LSR3 是其下游邻居，LSR2 将 **`FEC：172.16.1.0/24`** 及其映射的标签信息直接通告给上游邻居 LSR1，而此时其下游子邻居 LSR3 并没有通告任何标签信息。
 
-它强调的是按照请求发布所需的标签映射，而非主动向邻居通告大量 FEC 的标签映射。
+如果有去往 **`172.16.1.0`** 的报文进入 LSR1，LSR1 压入 LSR2 通告过来的标签后转发到 LSR2，而 LSR2 因为没有接收到下游 LSR3 的标签，所以只能以 IP 转发的方式送至 LSR3，也就是说去往 **`172.16.1.0`** 的 LSP 在 LSR2 处就断掉了。
 
-标签发布方式：DU / DoD，是否需要上游先请求
-标签分配控制方式：Independent / Ordered，是否需要先获得下游标签映射才能向上游发布
-标签保持方式：Liberal / Conservative，是否保留非当前下一跳邻居的标签映射
+#### 3.2.2 有序控制方式
 
-例如，DU + Ordered 表示：LSR 无须收到上游的请求，但通常要先获得下游的标签映射（或者自身就是该 FEC 的 Egress），才能向上游主动发布标签。
+有序控制方式下，LSR 在向上游通告标签映射信息之前，必须已经收到了来自下游 LSR 的标签，华为 VRP 系统默认采用该方式。如下图所示，以右侧网络 **`172.16.1.0/24`** 为例，LSR3 由于没有通告该网络的标签映射信息给到 LSR2，如果 LSR2 使用有序的标签控制模式，因此它也无法向其上游邻居 LSR1 通告有关 **`FEC：172.16.1.0/24`** 的标签，这时报文只能以 IP 转发的方式被送到网络 **`172.16.1.0/24`**。
 
-DoD + Independent 则表示：LSR 必须先收到上游请求，但可以不等待下一跳的标签映射，就为该 FEC 分配并发布本地标签。RFC 5036 第 2.6.1 节明确区分了这两种控制模式。
+<div align="center">
+    <img src="mpls_static/22.png" width="550"/>
+</div>
 
+在 **`DU + Ordered`** 模式下，LSR 不需要等待上游发送 Label Request 消息，但必须满足有序控制的标签发布条件。对于某个 FEC，如果本设备是该 FEC 的出口（egress）节点，就可以主动向上游通告标签映射。如果本设备不是出口节点，则需要先收到来自该 FEC 下一跳的 Label Mapping 消息，才能进一步向上游通告本地标签。
+
+在 **`DoD + Ordered`** 模式下，当上游 LSR 为某个 FEC 发送 Label Request 消息后，**<font color="red">下游 LSR 首先判断自己是否为该 FEC 的出口，或者是否已经具有来自下一跳的标签映射</font>**。如果满足条件，便可以向请求者返回 Label Mapping。如果不满足条件，则不能立即回复相应标签。
+
+>**<font color="red">独立控制模式下，虽然标签通告来得自由点，但是无法保证到目标网络的 LSP 是连续的，也就是容易发生 LSP 断裂的情况</font>**。而有序控制方式下，虽然标签通告受到一定的限制，建立 LSP 的效率会受其影响，但是它确保了整条 LSP 是连续的。
+
+### 3.3 标签保持方式
+
+当一台 LSR 收到来自多个 LDP 邻居的标签映射通告时，将这些标签信息保存到数据库中的方式有两种：保守保存（Conservative Retention Mode）和自由保存（Liberal Retention Mode）。
+
+#### 3.3.1 保守方式
+
+LSR 的标签保留如果采用保守方式，对于特定的一条 FEC，即使从多个 LDP 邻居都收到了标签映射，该 LSR 只会将最优的标签保留下来，其他的标签视为无用标签，**<font color="red">判断是否为最优标签的方法是根据 IP 转发表的下一跳地址，也就是说，拥有这个下一跳地址的 LDP 邻居通告的标签为最终保留的标签</font>**。
+
+<div align="center">
+    <img src="mpls_static/23.png" width="650"/>
+</div>
+
+如上图所示，对于目标网络前缀 **`10.1.0.0/24`** 来说，LSR3 的两个下游邻居（LSR1 和 LSR2）都向其通告了标签映射信息，这时 LSR 采用的标签保存方式为保守方式，那么它只会将 LSR1 的标签保存到数据库中，**<font color="red">因为在 LSR3 的 IP 转发表中去往目标网络 **`10.1.0.0`** 的下一跳是 LSR1</font>**，也就是路由器只将最好路径的标签予以保留，所以在 LSR3 的标签转发表中，最终为 **`FEC：10.1.0.0/24`** 选择的出标签为 1028。
+
+#### 3.3.2 自由方式
+
+如果使用自由方式的标签保留方式，LSR 会保存下所有的标签，即使收到的标签中有些暂时没有用（本地没有对应的路由或不是 IP 转发表中下一跳邻居通告的），如下图所示，LSR3 会将 1028 和 1029 两个标签都保留下来。这样做的好处是，当网络发生故障时，可以立刻使用新的标签计算出新的 LSP，收敛比较快，但这种方式因为保留下了所有标签，所以对数据库的空间要求较高。
+
+<div align="center">
+    <img src="mpls_static/23.png" width="650"/>
+</div>
+
+下面的输出信息显示华为设备默认采用的标签保留方式，如下输出所示。
+
+```java{.line-numbers}
+<AR4>display mpls ldp
+                           LDP Global Information
+ ------------------------------------------------------------------------------
+ Protocol Version        : V1            Neighbor Liveness    : 600 Sec
+ Graceful Restart        : Off           FT Reconnect Timer   : 0 Sec
+ MTU Signaling           : On            Recovery Timer       : 300 Sec
+ Capability-Announcement : Off           Longest-match        : Off
+ P2MP Capability         : Off                                       
+
+                          LDP Instance Information
+ ------------------------------------------------------------------------------
+ Instance ID             : 0             VPN-Instance         :
+ Instance Status         : Active        LSR ID               : 10.1.4.4
+ Loop Detection          : Off           Path Vector Limit    : 32
+ Label Distribution Mode : Ordered       Label Retention Mode : Liberal
+ Instance Deleting State : No            Instance Reseting State : No
+ Graceful-Delete         : Off           Graceful-Delete Timer : 5 Sec
+ ------------------------------------------------------------------------------
+```
+
+业界对于标签的发布和管理，常使用以下 4 种组合方式中的一种。通过上述的描述，华为设备的默认使用的组合是第 2 种。
+
+- DU + 独立控制 + 自由保留。
+- **DU + 有序控制 + 自由保留**。
+- DoD + 有序控制 + 保守保留。
+- DoD + 独立控制 + 保守保留。
