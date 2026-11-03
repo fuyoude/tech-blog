@@ -83,3 +83,216 @@ MPLS 报文中每经过一台 LSR，标签中的 TTL 减 1，当 TTL 减少到 0
 ### 2.3 路径矢量法
 
 路径矢量法是指在 LDP 报文传递过程中，记录沿途经过的所有 LSR，就像 BGP 协议的 **`AS-PATH`** 属性一样，当一台 LSR 收到 LDP 报文后，就会将自己的 **`LSR-ID`** 添加到报文中；如果收到的 LDP 报文已经有了本地的 **`LSR-ID`**，则认为出现了环路，终止建立 LSP。
+
+## 3.LDP 案例—LDP 基础
+
+### 3.1 场景及需求描述
+
+如下图所示，在网络中某用户的两个 Site（Site1 和 Site2）之间的 IP 业务流量需要通过 MPLS 域转发，LER1、LSR1、LSR2、LER2 是 MPLS 服务商的骨干设备，这些骨干设备已经运行和配置了 OSPF 协议，**<font color="red">设备间互连的接口、每个设备的环回口（Loopback0）及用户的网络都已经宣告进 OSPF 路由协议中</font>**。通过在骨干设备上运行 LDP 协议，从而可以创建公网的 LSP 隧道，用来承载用户站点之间的业务流量。
+
+<div align="center">
+    <img src="mpls_static/28.png" width="700"/>
+</div>
+
+逻辑拓扑图如下所示：
+
+<div align="center">
+    <img src="mpls_static/29.png" width="450"/>
+</div>
+
+### 3.2 配置思路
+
+首先在所有 LSR 上配置 LSR-ID，这里以 LER1 为例：
+
+```java{.line-numbers}
+[AR1-mpls]display this 
+#
+mpls lsr-id 10.1.1.1
+```
+
+LSR 没有缺省的 LSR ID，必须手工配置。**<font color="red">推荐使用 LSR 某个 Loopback 接口的地址作为 LSR ID</font>**。使用 Loopback 地址可保持 LSR ID 稳定，因为即使在链路故障或设备重启之后，Loopback 接口状态也保持不变。**如果在没有修改 Transport Address（用来建立 LDP 邻居会话的地址）的情况下，LSR ID 使用的地址必须能被邻居访问到，因为默认情况下，LSR ID 就是 Transport Address**。
+
+接着在所有 LSR 上启动 MPLS 及 MPLS LDP，首先在全局启用 MPLS 和 MPLS LDP，然后在骨干网的接口上启用 MPLS 和 MPLS LDP。这里以 LER1 为例：
+
+```java{.line-numbers}
+#
+mpls lsr-id 10.1.1.1
+mpls
+#
+mpls ldp
+#
+interface GigabitEthernet0/0/0
+ ip address 10.1.12.1 255.255.255.0 
+ mpls
+ mpls ldp
+```
+
+然后就是要在 LER1 和 LER2 上配置 **`lsp-trigger`** 命令，因为要实现 **`10.1.11.0/24`** 和 **`10.1.44.0/24`** 这两个网段的互访，而华为路由器默认只对 32 位地址的主机IP路由（不包括接口的 32 位地址的主机IP路由）触发建立 LSP。具体配置如下：
+
+```java{.line-numbers}
+#
+ sysname AR4
+mpls
+ lsp-trigger ip-prefix PC-FEC 
+#
+ip ip-prefix PC-FEC index 10 permit 10.1.44.0 24
+ip ip-prefix PC-FEC index 20 permit 10.1.11.0 24
+#
+ sysname AR1
+mpls
+ lsp-trigger ip-prefix PC-FEC 
+#
+ip ip-prefix PC-FEC index 10 permit 10.1.11.0 24
+ip ip-prefix PC-FEC index 20 permit 10.1.44.0 24
+```
+
+lsp-trigger 是华为 MPLS LDP 中用于控制 **`Ingress LSP`** 和 **`Egress LSP`** 建立的命令。它通过匹配指定的 IP 路由前缀（FEC），决定哪些路由可以触发相应的动态 LSP 建立。默认使用 host 模式，主要允许符合条件的 **`/32 `**主机路由触发 LSP。通过 **`lsp-trigger ip-prefix`** 可以允许指定的非主机路由（例如 **`/24`** 网段）触发 LSP。
+
+- Ingress LSP：如果路由器 X 存在一条到达目的网段 A 的非直连路由，并且 A 匹配 **`lsp-trigger`** 策略，那么 **<font color="red">X 就可以成为去往目的 FEC A 的 LDP LSP 的 Ingress 节点</font>**。当普通 IP 报文需要通过该 LSP 转发时，X 可以根据转发关系压入 MPLS 标签，并发送给下一跳。
+- Egress LSP：如果路由器 X 存在一条本地直连网段 B 的路由，并且 B 匹配 **`lsp-trigger`** 策略，**<font color="red">那么 X 就可以针对目的 FEC B 建立 Egress LSP，并向相应的上游 LDP 邻居通告标签映射</font>**。若采用隐式空标签机制，X 可以通告标签 3，使倒数第二跳执行 PHP（弹出标签）。
+
+>**`lsp-trigger`** 主要控制 Ingress 和 Egress LSP 的触发条件，不直接控制 Transit LSP 的建立。
+
+```java{.line-numbers}
+lsp-trigger { all | host | ip-prefix ip-prefix-name | none }
+```
+
+对 **`lsp-trigger`** 的具体参数说明如下：
+
+- all: 可根据所有静态路由和 IGP 路由项分配标签，触发建立 LSP；
+- host: 可根据 32 位地址的主机 IP 路由触发建立 LSP，华为设备默认使用的参数；
+- ip-prefix: 为 IP 地址前缀列表匹配的路由前缀分配标签，触发建立 LSP；
+- none: 不为任何路由前缀分配标签。
+
+### 3.3 验证
+
+可以通过 **`display mpls ldp session`** 验证 LDP 邻居会话状态，以 LSR1 为例，下面的输出信息显示出 LSR1 已经和两个 LDP 邻居正确建立会话（会话状态为 Operational），如下表所示。
+
+```java{.line-numbers}
+<AR2>display mpls ldp session 
+ LDP Session(s) in Public Network
+ Codes: LAM(Label Advertisement Mode), SsnAge Unit(DDDD:HH:MM)
+ A '*' before a session means the session is being deleted.
+ ------------------------------------------------------------------------------
+ PeerID             Status      LAM  SsnRole  SsnAge      KASent/Rcv
+ ------------------------------------------------------------------------------
+ 10.1.1.1:0         Operational DU   Active   0000:00:18  76/76
+ 10.1.3.3:0         Operational DU   Passive  0000:00:18  75/75
+ ------------------------------------------------------------------------------
+ TOTAL: 2 session(s) Found.
+```
+
+观察和分析 LSP 转发表，这里以 LSR1 为例，如下所示。
+
+>**`display mpls ldp lsp`** 侧重查看 LDP 协议建立和维护的 LSP 信息。**`display mpls lsp`** 侧重查看设备上的 MPLS LSP 转发信息，而且不限于 LDP，可包含 LDP、静态 LSP、BGP LSP、RSVP-TE LSP 等，取决于设备支持情况。
+
+```java{.line-numbers}
+<AR1>display mpls ldp lsp
+ LDP LSP Information
+ -------------------------------------------------------------------------------
+ DestAddress/Mask   In/OutLabel    UpstreamPeer    NextHop         OutInterface
+ -------------------------------------------------------------------------------
+ 10.1.2.2/32        1024/3         10.1.2.2        10.1.12.2       GE0/0/0
+ 10.1.3.3/32        1025/1025      10.1.2.2        10.1.12.2       GE0/0/0
+ 10.1.11.0/24       3/NULL         10.1.2.2        10.1.11.1       GE0/0/1
+*10.1.11.0/24       Liberal/1024                   DS/10.1.2.2
+ 10.1.44.0/24       NULL/1026      -               10.1.12.2       GE0/0/0
+ 10.1.44.0/24       1026/1026      10.1.2.2        10.1.12.2       GE0/0/0
+ -------------------------------------------------------------------------------
+ TOTAL: 5 Normal LSP(s) Found.
+ TOTAL: 1 Liberal LSP(s) Found.
+ TOTAL: 0 Frr LSP(s) Found.
+
+<AR2>display mpls ldp lsp 
+ LDP LSP Information
+ -------------------------------------------------------------------------------
+ DestAddress/Mask   In/OutLabel    UpstreamPeer    NextHop         OutInterface
+ -------------------------------------------------------------------------------
+ 10.1.2.2/32        3/NULL         10.1.1.1        127.0.0.1       InLoop0
+ 10.1.2.2/32        3/NULL         10.1.3.3        127.0.0.1       InLoop0
+*10.1.2.2/32        Liberal/1024                   DS/10.1.1.1
+*10.1.2.2/32        Liberal/1024                   DS/10.1.3.3
+ 10.1.3.3/32        NULL/3         -               10.1.23.3       GE0/0/1
+ 10.1.3.3/32        1025/3         10.1.1.1        10.1.23.3       GE0/0/1
+ 10.1.3.3/32        1025/3         10.1.3.3        10.1.23.3       GE0/0/1
+*10.1.3.3/32        Liberal/1025                   DS/10.1.1.1
+ 10.1.11.0/24       1024/3         10.1.1.1        10.1.12.1       GE0/0/0
+ 10.1.11.0/24       1024/3         10.1.3.3        10.1.12.1       GE0/0/0
+*10.1.11.0/24       Liberal/1025                   DS/10.1.3.3
+ 10.1.44.0/24       1026/1026      10.1.1.1        10.1.23.3       GE0/0/1
+ 10.1.44.0/24       1026/1026      10.1.3.3        10.1.23.3       GE0/0/1
+*10.1.44.0/24       Liberal/1026                   DS/10.1.1.1
+ -------------------------------------------------------------------------------
+ TOTAL: 9 Normal LSP(s) Found.
+ TOTAL: 5 Liberal LSP(s) Found.
+ TOTAL: 0 Frr LSP(s) Found.
+
+<AR3>display mpls ldp lsp 
+ LDP LSP Information
+ -------------------------------------------------------------------------------
+ DestAddress/Mask   In/OutLabel    UpstreamPeer    NextHop         OutInterface
+ -------------------------------------------------------------------------------
+ 10.1.2.2/32        NULL/3         -               10.1.23.2       GE0/0/0
+ 10.1.2.2/32        1024/3         10.1.2.2        10.1.23.2       GE0/0/0
+ 10.1.2.2/32        1024/3         10.1.4.4        10.1.23.2       GE0/0/0
+*10.1.2.2/32        Liberal/1024                   DS/10.1.4.4
+ 10.1.3.3/32        3/NULL         10.1.2.2        127.0.0.1       InLoop0
+ 10.1.3.3/32        3/NULL         10.1.4.4        127.0.0.1       InLoop0
+*10.1.3.3/32        Liberal/1025                   DS/10.1.2.2
+*10.1.3.3/32        Liberal/1025                   DS/10.1.4.4
+ 10.1.11.0/24       1025/1024      10.1.2.2        10.1.23.2       GE0/0/0
+ 10.1.11.0/24       1025/1024      10.1.4.4        10.1.23.2       GE0/0/0
+*10.1.11.0/24       Liberal/1026                   DS/10.1.4.4
+ 10.1.44.0/24       1026/3         10.1.2.2        10.1.34.4       GE0/0/1
+ 10.1.44.0/24       1026/3         10.1.4.4        10.1.34.4       GE0/0/1
+*10.1.44.0/24       Liberal/1026                   DS/10.1.2.2
+ -------------------------------------------------------------------------------
+ TOTAL: 9 Normal LSP(s) Found.
+ TOTAL: 5 Liberal LSP(s) Found.
+ TOTAL: 0 Frr LSP(s) Found.
+```
+
+#### 3.3.1 默认 host 策略与 Ingress/Egress LSP
+
+接下来我们仔细分析一下 AR1 和 AR2 上的 LDP LSP 信息。**`lsp-trigger`** 是华为 MPLS LDP 中控制 **Ingress LSP 和 Egress LSP 建立条件**的命令，该命令默认采用 **`host`** 策略，主要允许符合条件的 **`/32`** 主机路由触发 LSP。当配置 **`lsp-trigger ip-prefix`** 后，则以指定的 IP 前缀列表作为触发条件，而不再同时沿用默认的 **`host`** 策略（和前面总结的 lsp-trigger 规律一样）。
+
+当 AR2 和 AR3 没有显式配置 **`lsp-trigger`** 时，默认采用 **`host`** 模式。对于本地 **`/32`** 主机路由，设备可以作为对应 FEC 的 Egress。对于通过 OSPF 等路由协议学习到的远端 **`/32`** 主机路由，则设备可以作为 Ingress。
+
+对于 AR2 来说，其 **`Loopback0`** 地址为 **`10.1.2.2/32`**，属于本地主机路由，因此 AR2 为该 FEC 建立 Egress LSP，并向 AR1、AR3 通告隐式空标签 3。在 LDP LSP 表中，可以看到 **`10.1.2.2/32`** 对应两条 **`3/NULL`** 表项，分别关联不同的 LDP 对等体。而对于 AR3 的 **`Loopback0`** **`10.1.3.3/32`**，AR2 已经通过 OSPF 学到该路由，由于该路由符合默认 host 策略，因此 AR2 建立对应的 Ingress LSP，形成 **`NULL/3`** 表项，并且分配好本地标签 **`1025/3`** 之后向 AR1 和 AR3 通告。
+
+对于 AR3 来说，情况正好相反。对于本地 Loopback0 **`10.1.3.3/32`**，AR3 作为 Egress，建立 **`3/NULL`** 表项，并向 AR2、AR4 通告标签 3。对于通过 OSPF 学到的远端 FEC **`10.1.2.2/32`**，可以作为该 FEC 的 Ingress，建立 **`NULL/3`** 表项。
+
+#### 3.3.2 ip-prefix 策略与 Ingress/Egress LSP
+
+在 AR1 和 AR4 上配置 **`lsp-trigger ip-prefix PC-FEC`** 后，**<font color="red">设备仅允许符合 **`PC-FEC`** 前缀列表的路由触发相应的 Ingress/Egress LSP</font>**。本实验中，前缀列表只允许 **`10.1.11.0/24`** 和 **`10.1.44.0/24`**。
+
+从 AR1 的 **`display mpls ldp lsp`** 输出可以看到，对于本地直连网段 **`10.1.11.0/24`**，AR1 建立了 **`3/NULL`** 表项，表示 AR1 是该 FEC 的 Egress，并向上游 AR2 通告隐式空标签 3。而对于远端网段 **`10.1.44.0/24`**，AR1 已经通过 OSPF 学到该路由，建立了 **`NULL/1026`** 的 Ingress LSP。
+
+虽然 AR1 通过 OSPF 学到了 **`10.1.2.2/32`** 和 **`10.1.3.3/32`** 等远端主机路由，并通过 LDP 从 AR2 获得了相应的下游标签，但由于这些 FEC 不匹配 PC-FEC 策略，因此 AR1 没有为它们触发 Ingress LSP。不过，AR1 的 LDP LSP 表中仍然存在 **`10.1.2.2/32`** 对应的 **`1024/3`** 和 **`10.1.3.3/32`** 对应的 **`1025/1025`**。相比之下，AR2、AR3 没有显式配置 **`lsp-trigger`**，采用默认的 host 策略，无法为 **`10.1.11.0`** 和 **`10.1.44.0`** 分别建立对应的 Ingress LSP。
+
+接下来解释为什么在 AR1-AR4 的 LDP LSP 表中都没有 **`10.1.1.1/32`** 和 **`10.1.4.4/32`** 的条目。在本实验中，AR1 和 AR4 的 **`PC-FEC`** 仅允许 **`10.1.11.0/24`** 和 **`10.1.44.0/24`**，没有允许各自 Loopback0 对应的 **`10.1.1.1/32`**、**`10.1.4.4/32`**。因此不会通过当前策略触发对应的 Egress LSP，也不会由这些出口 LSP 向上游发布相应的标签映射。
+
+```java{.line-numbers}
+<AR2>display mpls ldp verbose 
+                           LDP Global Information
+ ------------------------------------------------------------------------------
+ Protocol Version        : V1            Neighbor Liveness    : 600 Sec
+ Graceful Restart        : Off           FT Reconnect Timer   : 0 Sec
+ MTU Signaling           : On            Recovery Timer       : 300 Sec
+ Capability-Announcement : Off           Longest-match        : Off
+ P2MP Capability         : Off                                       
+
+                          LDP Instance Information
+ ------------------------------------------------------------------------------
+ Instance ID             : 0             VPN-Instance         :
+ Instance Status         : Active        LSR ID               : 10.1.2.2
+ Loop Detection          : Off           Path Vector Limit    : 32
+ Label Distribution Mode : Ordered       Label Retention Mode : Liberal
+ Instance Deleting State : No            Instance Reseting State : No
+ Graceful-Delete         : Off           Graceful-Delete Timer : 5 Sec
+```
+
+由于华为 LDP 默认采用 **Ordered（有序标签控制）**（如上所示），非 Egress 节点需要先获得下游针对该 FEC 发布的标签映射，才能继续向上游建立和传播对应的标签关系。因此，当 AR1、AR4 未触发各自 Loopback0 的 Egress LSP 时，AR2、AR3 也无法通过正常的有序标签传播过程建立这两个 FEC 对应的完整 LSP。
+
+### 3.4 MPLS 数据包转发的流程分析
+
