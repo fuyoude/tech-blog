@@ -369,7 +369,7 @@ LDP 会依据路由表中的路由前缀进行标签的分配，同时根据标�
     <img src="mpls_static/31.png" width="550"/>
 </div>
 
-### 4.1 汇总前
+### 4.1 汇总前 LDP LSP 的正常建立
 
 汇总前 LSR2 的 LSP 转发表如下所示：
 
@@ -401,50 +401,23 @@ FEC                In/Out Label  In/Out IF                      Vrf Name
 10.1.44.0/24       1026/1024     -/GE0/0/1  
 ```
 
+汇总前 LSR1 和 LSR2 路由表中 **`10.1.44.0`** 的路由条目如下所示：
+
 ```java{.line-numbers}
-<AR2>display ip routing-table 
+<AR2>display ip routing-table 10.1.44.0
 Route Flags: R - relay, D - download to fib
 ------------------------------------------------------------------------------
-Routing Tables: Public    Destinations : 17       Routes : 17       
-
 Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
-
-       10.1.1.1/32  OSPF    10   1           D   10.1.12.1       GigabitEthernet0/0/0
-       10.1.2.2/32  Direct  0    0           D   127.0.0.1       LoopBack0
-       10.1.3.3/32  OSPF    10   1           D   10.1.23.3       GigabitEthernet0/0/1
-       10.1.4.4/32  OSPF    10   2           D   10.1.23.3       GigabitEthernet0/0/1
-      10.1.11.0/24  OSPF    10   2           D   10.1.12.1       GigabitEthernet0/0/0
-      10.1.12.0/24  Direct  0    0           D   10.1.12.2       GigabitEthernet0/0/0
-      10.1.12.2/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
-    10.1.12.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
-      10.1.23.0/24  Direct  0    0           D   10.1.23.2       GigabitEthernet0/0/1
-      10.1.23.2/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
-    10.1.23.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
-      10.1.34.0/24  OSPF    10   2           D   10.1.23.3       GigabitEthernet0/0/1
       10.1.44.0/24  OSPF    10   3           D   10.1.23.3       GigabitEthernet0/0/1
 
-<AR3>display ip routing-table 
+<AR3>display ip routing-table 10.1.44.0
 Route Flags: R - relay, D - download to fib
-------------------------------------------------------------------------------
-Routing Tables: Public     Destinations : 17       Routes : 17       
+------------------------------------------------------------------------------    
 Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
-
-       10.1.1.1/32  OSPF    10   2           D   10.1.23.2       GigabitEthernet0/0/0
-       10.1.2.2/32  OSPF    10   1           D   10.1.23.2       GigabitEthernet0/0/0
-       10.1.3.3/32  Direct  0    0           D   127.0.0.1       LoopBack0
-       10.1.4.4/32  OSPF    10   1           D   10.1.34.4       GigabitEthernet0/0/1
-      10.1.11.0/24  OSPF    10   3           D   10.1.23.2       GigabitEthernet0/0/0
-      10.1.12.0/24  OSPF    10   2           D   10.1.23.2       GigabitEthernet0/0/0
-      10.1.23.0/24  Direct  0    0           D   10.1.23.3       GigabitEthernet0/0/0
-      10.1.23.3/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
-    10.1.23.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
-      10.1.34.0/24  Direct  0    0           D   10.1.34.3       GigabitEthernet0/0/1
-      10.1.34.3/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
-    10.1.34.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
       10.1.44.0/24  OSPF    10   2           D   10.1.34.4       GigabitEthernet0/0/1
 ```
 
-### 4.2 汇总后
+### 4.2 汇总后 FEC 不匹配导致 LSP 不连续
 
 在 AR3 上配置了如下命令，这表示 AR3 将 Area 1 中位于 **`10.1.44.0/22`** 范围内的路由进行区域间汇总，**<font color="red">并向 Area 0 发布汇总后的路由，而不再逐条发布被汇总的明细前缀</font>**。
 
@@ -492,9 +465,9 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
       10.1.44.0/22  OSPF    10   3           D   10.1.23.3       GigabitEthernet0/0/1
 ```
 
-所以这时的问题就是 LSR1（AR1）虽然得到了路由 **`10.1.44.0/22`**，并且收到了 AR3 通告的 **`10.1.44.0/24`** 以及对应的标签 1024。由于华为设备默认采用有序控制的方式来建立 LSP，根据 RFC 5036，When using LSP Ordered Control, an LSR may initiate the transmission of a label mapping only for a FEC for which it has a label mapping for the FEC next hop, or for which the LSR is the egress. 
+所以这时的问题就是 LSR1（AR2）虽然得到了路由 **`10.1.44.0/22`**，并且收到了 AR3 通告的 **`10.1.44.0/24`** 以及对应的标签 1024。但是在 AR2 的路由表中没有精确匹配 **`10.1.44.0/24`** 的路由前缀。根据 RFC 5036，An LSR receiving a Label Mapping message from a downstream LSR for a Prefix SHOULD NOT use the label for forwarding unless its routing table contains an entry that exactly matches the FEC Element. 也就是 LSR 收到某个前缀的 Label Mapping 后，通常不应在路由表没有精确匹配 FEC 路由表项的情况下使用该标签进行转发。因此 AR2 无法为该 **`10.1.44.0/24`** FEC 安装为正常的 Transit LSP，只能按照 Liberal Retention 机制保留从 AR3 学到的标签绑定，因此在 LDP LSP 表中出现 **`Liberal/1024`**。
 
-也就是说 LSR 只有在自己是某个 FEC 的 Egress，或者已经获得该 FEC 当前下一跳的标签映射时，才能按有序控制方式向上游发起标签通告。而此时 LSR1 的路由表中没有 **`10.1.44.0/24`**，因此无法为其分配本地标签。所以在有序控制的标签发布方式下，LSR1 自身也不再将分配标签信息给到上游邻居（LER1）。
+由于华为 LDP 在本实验中采用 Ordered（有序标签控制）模式，AR2 在没有建立该 FEC 的正常下游 LSP 转发关系时，也不会继续向上游 AR1 通告对应的有效标签映射。因此，AR1 无法建立到达 **`10.1.44.0/24`** 的完整 Ingress LSP。
 
 ```java{.line-numbers}
 <AR3>display mpls ldp lsp 
@@ -536,4 +509,55 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
  TOTAL: 0 Frr LSP(s) Found.
 ```
 
-也就是说，对于由用户 Site1 发往目标路由前缀 **`10.1.44.0/24`** 的数据包来说，经过路径 LER1、LSR1、LSR2 时，使用的是 IP 转发方式。经过 LSR2 后，采用的是 MPLS 转发方式。也就是说，对于该 FEC 来说，LSP 实际上是不连续的。
+根据上面各个路由器的 LSP 表项，对于 PC1 发往 PC2 的业务报文，由于 AR1 没有对应的正常 Ingress LSP，因此报文预期通过 IP 转发到 AR2。AR2 虽然保留了 AR3 通告的标签 1024，但并未将其用于正常 MPLS 转发，因此继续通过普通 IP 方式将报文送往 AR3。AR3 虽然存在 **`1024/3`** 标签交换表项，但是该表项用于处理入标签为 1024 的 MPLS 报文，不能直接使普通 IP 报文进入 MPLS LSP。在当前没有相应 Ingress LSP 的情况下，AR3 仍然按照 IP 路由将报文送往 AR4。
+
+我们可以对 LSR2 的 **`G0/0/0`** 口进行抓包，然后在 PC1 ping PC2 的时候，抓到的报文如下所示，说明 AR2 发给 AR3 的是普通的 IP 报文，而不是 MPLS 报文。
+
+```java{.line-numbers}
+Frame 375: 74 bytes on wire (592 bits), 74 bytes captured (592 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_b7:1f:2d (00:e0:fc:b7:1f:2d), Dst: HuaweiTe_fd:4f:31 (00:e0:fc:fd:4f:31)
+Internet Protocol Version 4, Src: 10.1.11.11, Dst: 10.1.44.44
+Internet Control Message Protocol
+```
+
+也就是说，对于由用户 Site1 发往目标路由前缀 **`10.1.44.0/24`** 的数据包来说，经过路径 LER1、LSR1、LSR2、LER2 时，使用的是 IP 转发方式。
+
+>**<font color="red">在 MPLS 骨干网内部不建议对路由进行汇总，否则会导致 LSP 不连续，难以保证 IP 报文的转发</font>**，尤其是在 MPLS VPN 骨干网内部，路由汇总还可能会导致用户的 VPN 业务无法正确传输到目的站点。
+
+## 5.LDP 案例—LDP 标签过滤
+
+在 MPLS 网络中，有些路由器资源有限，为降低资源开销，减少不必要的 LSP 的建立，LDP 在为邻居通告标签时可以进行标签过滤。下图所示的场景中，假设 MPLS 域的 AR5 资源利用率较高，为节省开销，减少 LSP 的数量，只接收 **`FEC：172.16.1.0/24`** 和 **`FEC：172.16.2.0/24`** 的标签映射信息，可以通过在 LSR3 上配置 LDP Inbound 策略来实现此需求。
+
+<div align="center">
+    <img src="mpls_static/33.png" width="750"/>
+</div>
+
+在 AR5 上配置 LDP Inbound 策略，只接收由 LSR1 发出的对应路由前缀的标签映射报文，如下输出所示。
+
+```java{.line-numbers}
+[AR5]ip ip-prefix SITE-FEC index 10 permit 172.16.1.0 24
+[AR5]ip ip-prefix SITE-FEC index 20 permit 172.16.2.0 24 
+[AR5]mpls ldp
+[AR5-mpls-ldp]inbound peer 10.1.2.2 fec ip-prefix SITE-FEC
+[AR5]mpls
+[AR5-mpls]lsp-trigger ip-prefix SITE-FEC
+```
+
+AR5 配置了 LDP Inbound 策略 **`inbound peer 10.1.2.2 fec ip-prefix SITE-FEC`**，只接受 AR2 针对这两个业务 FEC 发布的标签映射。其中，AR2 为 **`172.16.1.0/24`** 发布的标签为 1024，为 **`172.16.2.0/24`** 发布的标签为 1026。
+
+配置完过滤策略后，检查一下 AR5 的 LSP 转发表，可以发现从 AR2 接收到的 FEC 标签映射信息，如下输出所示。当 AR5 的 **`lsp-trigger`** 策略允许这两个 **`/24`** FEC 触发 Ingress LSP，并且对应的 IP 路由及下游标签映射均有效时，AR5 就可以建立 **`NULL/1024`** 和 **`NULL/1026`** 两条入口 LSP 表项。
+
+**<font color="red">需要特别区分的是，Inbound 决定从指定邻居接受哪些 FEC 的标签映射，`lsp-trigger` 决定哪些符合条件的路由可以触发本设备的</font>** **`Ingress/Egress LSP`**。
+
+```java{.line-numbers}
+<AR5>display mpls lsp nexthop 10.1.25.2
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+172.16.1.0/24      NULL/1024     -/GE0/0/0                                     
+172.16.1.0/24      1024/1024     -/GE0/0/0                                     
+172.16.2.0/24      NULL/1026     -/GE0/0/0                                     
+172.16.2.0/24      1025/1026     -/GE0/0/0     
+```
+
