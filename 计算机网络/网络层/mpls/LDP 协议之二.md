@@ -296,3 +296,244 @@ lsp-trigger { all | host | ip-prefix ip-prefix-name | none }
 
 ### 3.4 MPLS 数据包转发的流程分析
 
+现在假设 Site1 中的主机 PC1 开始访问 Site2 的主机 PC2，当数据流到达 MPLS 骨干网时，我们一起来观察和分析一下每台 LSR 是如何处理接收到的报文的。
+
+报文到达 LER1 时的处理。首先来观察一下 LER1 的 LSP 转发表中关于 **`FEC：10.1.44.0/24`** 的详细信息，如下输出所示。
+
+```java{.line-numbers}
+<AR1>display mpls lsp include 10.1.44.0 24 verbose 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+  No                  :  1
+  VrfIndex            :        
+  Fec                 :  10.1.44.0/24
+  Nexthop             :  10.1.12.2
+  In-Label            :  NULL
+  Out-Label           :  1025
+  In-Interface        :  ----------
+  Out-Interface       :  GigabitEthernet0/0/0
+  LspIndex            :  6146
+  Token               :  0x3
+  FrrToken            :  0x0
+  LsrType             :  Ingress
+  Outgoing token      :  0x0
+  Label Operation     :  PUSH
+  Mpls-Mtu            :  1500
+  TimeStamp           :  164sec
+  Bfd-State           :  ---
+  BGPKey              :  ------
+```
+
+由上面的输出信息可知，LER1 会使用出标签 1025（标签操作为 PUSH）将该 FEC 的所有报文发至下一跳 **`10.1.12.2`**（LSR1）。实际上作为该 LSP 的 Ingress 节点，当 LER1 接收到用户的 IP 报文时，通过查找 FIB 表后进行转发，所以我们再来观察一下 FIB 表中关于该路由前缀的转发信息，如下输出所示。
+
+```java{.line-numbers}
+<AR1>display fib 10.1.44.0 verbose 
+  Route Entry Count: 1
+ Destination: 10.1.44.0           Mask     : 255.255.255.0       
+ Nexthop    : 10.1.12.2           OutIf    : GigabitEthernet0/0/0
+ LocalAddr  : 10.1.12.1           LocalMask: 0.0.0.0             
+ Flags      : DGU                 Age      : 482sec              
+ ATIndex    : 0                   Slot     : 0                   
+ LspFwdFlag : 1                   LspToken : 0x3                 
+ InLabel    : NULL                OriginAs : 0                   
+ BGPNextHop : 0.0.0.0             PeerAs   : 0                   
+ QosInfo    : 0x0                 OriginQos: 0x0                 
+ NexthopBak : 0.0.0.0             OutIfBak : [No Intf]           
+ LspTokenBak: 0x0                 InLabelBak : NULL                
+ LspToken_ForInLabelBak : 0x0                 
+ EntryRefCount : 0                   
+ VlanId : 0x0                 
+ BgpKey : 0                   
+ BgpKeyBak : 0                   
+ LspType         : 3              Label_ForLspTokenBak   : 0
+ MplsMtu         : 1500           Gateway_ForLspTokenBak : 0.0.0.0             
+ NextToken       : 0x0            IfIndex_ForLspTokenBak : 0
+ Label_NextToken : NULL           Label : 1025
+ LspBfdState     : 9    
+```
+
+在上面的输出信息中，可以发现路由前缀 **`10.1.44.0`** 在 FIB 中对应着一个标签 1025，也就是转发去往该目标路由前缀的 IP 报文时需要压入此标签，而这个标签信息来源于 LSP 转发表。**<font color="red">FIB 中的路由前缀是通过使用 LspToken 这种指针的方式关联 LSP 转发表的标签</font>**。这里的 LspToken 值为 0x3，这与 LSP 转发表中 **`10.1.44.0/24`** 对应的 token 值是相同的。在 FIB 表中，如果该指针值为 0，则对应的报文采用 IP 转发的方式。
+
+## 4.LDP 案例—路由汇总对 LSP 的影响
+
+LDP 会依据路由表中的路由前缀进行标签的分配，同时根据标签的分发方式，将本地分配的标签通告给 LDP 邻居，从而触发建立 LSP。接下来对案例分析 1 稍微作了一下修改，将 MPLS 骨干网划分为两个 OSPF 区域，LER1、LSR1、LSR2 互连的接口位于区域 0，LSR2 和 LER2 互连的接口及 LER2 右侧的接口位于区域 1，然后在 LSR2 上对路由前缀 **`10.1.44.0/24`** 做路由汇总，汇总后的路由前缀为 **`10.1.44.0/22`**。
+
+<div align="center">
+    <img src="mpls_static/30.png" width="750"/>
+</div>
+
+上述拓扑图的逻辑图如下所示：
+
+<div align="center">
+    <img src="mpls_static/31.png" width="550"/>
+</div>
+
+### 4.1 汇总前
+
+汇总前 LSR2 的 LSP 转发表如下所示：
+
+```java{.line-numbers}
+<AR3>display mpls lsp 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+10.1.44.0/24       1024/3        -/GE0/0/1                                     
+10.1.3.3/32        3/NULL        -/-                                           
+10.1.2.2/32        NULL/3        -/GE0/0/0                                     
+10.1.2.2/32        1025/3        -/GE0/0/0                                     
+10.1.11.0/24       1026/1024     -/GE0/0/0  
+```
+
+LSR1 的 LSP 转发表，如下输出所示：
+
+```java{.line-numbers}
+<AR2>display mpls lsp 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+10.1.2.2/32        3/NULL        -/-                                           
+10.1.11.0/24       1024/3        -/GE0/0/0                                     
+10.1.3.3/32        NULL/3        -/GE0/0/1                                     
+10.1.3.3/32        1025/3        -/GE0/0/1                                     
+10.1.44.0/24       1026/1024     -/GE0/0/1  
+```
+
+```java{.line-numbers}
+<AR2>display ip routing-table 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public    Destinations : 17       Routes : 17       
+
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+
+       10.1.1.1/32  OSPF    10   1           D   10.1.12.1       GigabitEthernet0/0/0
+       10.1.2.2/32  Direct  0    0           D   127.0.0.1       LoopBack0
+       10.1.3.3/32  OSPF    10   1           D   10.1.23.3       GigabitEthernet0/0/1
+       10.1.4.4/32  OSPF    10   2           D   10.1.23.3       GigabitEthernet0/0/1
+      10.1.11.0/24  OSPF    10   2           D   10.1.12.1       GigabitEthernet0/0/0
+      10.1.12.0/24  Direct  0    0           D   10.1.12.2       GigabitEthernet0/0/0
+      10.1.12.2/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
+    10.1.12.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
+      10.1.23.0/24  Direct  0    0           D   10.1.23.2       GigabitEthernet0/0/1
+      10.1.23.2/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
+    10.1.23.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
+      10.1.34.0/24  OSPF    10   2           D   10.1.23.3       GigabitEthernet0/0/1
+      10.1.44.0/24  OSPF    10   3           D   10.1.23.3       GigabitEthernet0/0/1
+
+<AR3>display ip routing-table 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public     Destinations : 17       Routes : 17       
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+
+       10.1.1.1/32  OSPF    10   2           D   10.1.23.2       GigabitEthernet0/0/0
+       10.1.2.2/32  OSPF    10   1           D   10.1.23.2       GigabitEthernet0/0/0
+       10.1.3.3/32  Direct  0    0           D   127.0.0.1       LoopBack0
+       10.1.4.4/32  OSPF    10   1           D   10.1.34.4       GigabitEthernet0/0/1
+      10.1.11.0/24  OSPF    10   3           D   10.1.23.2       GigabitEthernet0/0/0
+      10.1.12.0/24  OSPF    10   2           D   10.1.23.2       GigabitEthernet0/0/0
+      10.1.23.0/24  Direct  0    0           D   10.1.23.3       GigabitEthernet0/0/0
+      10.1.23.3/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
+    10.1.23.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/0
+      10.1.34.0/24  Direct  0    0           D   10.1.34.3       GigabitEthernet0/0/1
+      10.1.34.3/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
+    10.1.34.255/32  Direct  0    0           D   127.0.0.1       GigabitEthernet0/0/1
+      10.1.44.0/24  OSPF    10   2           D   10.1.34.4       GigabitEthernet0/0/1
+```
+
+### 4.2 汇总后
+
+在 AR3 上配置了如下命令，这表示 AR3 将 Area 1 中位于 **`10.1.44.0/22`** 范围内的路由进行区域间汇总，**<font color="red">并向 Area 0 发布汇总后的路由，而不再逐条发布被汇总的明细前缀</font>**。
+
+```java{.line-numbers}
+[AR3-ospf-1-area-0.0.0.1]display this 
+#
+ area 0.0.0.1 
+  abr-summary 10.1.44.0 255.255.252.0
+  network 10.1.34.0 0.0.0.255 
+```
+
+汇总后的路由（**`10.1.44.0/22`**）会通告给 LSR1（AR2），而明细路由 **`10.1.44.0/24`** 不再通告给 LSR1（AR2）。AR3 和 AR2 的汇总后的路由表如下所示，可以看到，LSR2（AR3）上只有明细路由，没有汇总路由，而在 LSR1（AR2）上只有汇总路由，没有明细路由，这说明 AR3 没有再向 AR2 通告明细路由。
+
+```java{.line-numbers}
+<AR3>display ip routing-table 10.1.44.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+      10.1.44.0/24  OSPF    10   2           D   10.1.34.4       GigabitEthernet0/0/1
+<AR3>display ospf lsdb summary 
+	 OSPF Process 1 with Router ID 3.3.3.3
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Sum-Net
+  Ls id     : 10.1.44.0
+  Adv rtr   : 3.3.3.3  
+  Ls age    : 1382 
+  Len       : 28 
+  Options   :  E  
+  seq#      : 80000003 
+  chksum    : 0x9d7b
+  Net mask  : 255.255.252.0
+  Tos 0  metric: 2
+  Priority  : Low
+
+
+<AR2>display ip routing-table 10.1.44.0
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : Public
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+      10.1.44.0/22  OSPF    10   3           D   10.1.23.3       GigabitEthernet0/0/1
+```
+
+所以这时的问题就是 LSR1（AR1）虽然得到了路由 **`10.1.44.0/22`**，并且收到了 AR3 通告的 **`10.1.44.0/24`** 以及对应的标签 1024。由于华为设备默认采用有序控制的方式来建立 LSP，根据 RFC 5036，When using LSP Ordered Control, an LSR may initiate the transmission of a label mapping only for a FEC for which it has a label mapping for the FEC next hop, or for which the LSR is the egress. 
+
+也就是说 LSR 只有在自己是某个 FEC 的 Egress，或者已经获得该 FEC 当前下一跳的标签映射时，才能按有序控制方式向上游发起标签通告。而此时 LSR1 的路由表中没有 **`10.1.44.0/24`**，因此无法为其分配本地标签。所以在有序控制的标签发布方式下，LSR1 自身也不再将分配标签信息给到上游邻居（LER1）。
+
+```java{.line-numbers}
+<AR3>display mpls ldp lsp 
+ LDP LSP Information
+ -------------------------------------------------------------------------------
+ DestAddress/Mask   In/OutLabel    UpstreamPeer    NextHop         OutInterface
+ -------------------------------------------------------------------------------
+*10.1.11.0/24       Liberal/1026                   DS/10.1.4.4
+ 10.1.44.0/24       1024/3         10.1.4.4        10.1.34.4       GE0/0/1
+ 10.1.44.0/24       1024/3         10.1.2.2        10.1.34.4       GE0/0/1
+ -------------------------------------------------------------------------------
+ TOTAL: 9 Normal LSP(s) Found.
+ TOTAL: 4 Liberal LSP(s) Found.
+ TOTAL: 0 Frr LSP(s) Found.
+
+<AR2>display mpls ldp lsp 
+ LDP LSP Information
+ -------------------------------------------------------------------------------
+ DestAddress/Mask   In/OutLabel    UpstreamPeer    NextHop         OutInterface
+ -------------------------------------------------------------------------------
+*10.1.44.0/24       Liberal/1024                   DS/10.1.3.3
+ -------------------------------------------------------------------------------
+ TOTAL: 7 Normal LSP(s) Found.
+ TOTAL: 5 Liberal LSP(s) Found.
+ TOTAL: 0 Frr LSP(s) Found.
+
+<AR1>display mpls ldp lsp 
+ LDP LSP Information
+ -------------------------------------------------------------------------------
+ DestAddress/Mask   In/OutLabel    UpstreamPeer    NextHop         OutInterface
+ -------------------------------------------------------------------------------
+ 10.1.2.2/32        1024/3         10.1.2.2        10.1.12.2       GE0/0/0
+ 10.1.3.3/32        1025/1025      10.1.2.2        10.1.12.2       GE0/0/0
+ 10.1.11.0/24       3/NULL         10.1.2.2        10.1.11.1       GE0/0/1
+*10.1.11.0/24       Liberal/1024                   DS/10.1.2.2
+ -------------------------------------------------------------------------------
+ TOTAL: 3 Normal LSP(s) Found.
+ TOTAL: 1 Liberal LSP(s) Found.
+ TOTAL: 0 Frr LSP(s) Found.
+```
+
+也就是说，对于由用户 Site1 发往目标路由前缀 **`10.1.44.0/24`** 的数据包来说，经过路径 LER1、LSR1、LSR2 时，使用的是 IP 转发方式。经过 LSR2 后，采用的是 MPLS 转发方式。也就是说，对于该 FEC 来说，LSP 实际上是不连续的。
