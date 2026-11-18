@@ -129,7 +129,399 @@ PE 从 CE 学习到客户的私网路由后，需要将这些私网路由从 VPN
 
 经过上述 4 个步骤后，VPN 客户的不同站点就可以实现私网路由的交互，从而构建成一个 VPN。在这个过程中可以发现，**<font color="blue">在骨干网络中，只有 PE 设备才会保存私网路由（存放在各 VRF 中），而骨干网的核心设备（P 设备）根本不会收到任何私网路由，它上面只存在公网路由</font>**，从而节省了设备开销。
 
-## 4.典型案例分析
+## 4.CE-PE 之间运行 OSPF 协议
 
-### 4.1 CE-PE 之间运行静态路由
+### 4.1 网络拓扑介绍
+
+如下图所示，某客户（VPN A）的两个站点（Site1 和 Site2）通过 MPLS VPN 实现互访，其中 CE1 连接 Site1，CE1 通过服务提供商的 PE1 接入至 MPLS VPN 骨干网。CE2 连接 Site2，CE2 通过服务提供商的 PE2 接入至 MPLS VPN 骨干网。
+
+<div align="center">
+    <img src="mpls_static/45.png" width="750"/>
+</div>
+
+服务商骨干网的 BGP AS 号为 100，IGP 使用 OSPF，服务商为客户分配的 VPN 实例名为 vpna，RD 值为 **`100:1`**，Site1 和 Site2 的 Import RT 值和 Export RT 值均为 **`1:1`**，PE-CE 之间使用 OSPF 协议交换私网路由，Site1 和 Site2 均在 Area0 中。
+
+在上述拓扑图中，作为经典的 MPLS L3 VPN 技术中，OSPF 作为运营商骨干网的 IGP，提供公网路由可达性，确保各 PE、P 路由器之间能够互相到达。**<font color="red">MPLS LDP 基于骨干网的 IP 可达性分发公网标签，建立从入口 PE 到出口 PE 的公网 LSP。MP-BGP VPNv4 在 PE 路由器之间交换客户 VPN 路由和私网标签</font>**，私网标签由通告 VPN 路由的出口 PE 分配，再通过 MP-BGP 随 VPNv4 路由传递给入口 PE。
+
+RD 用于区分 VPNv4 前缀，RT 用于控制 VPN 路由的导入关系。入口 PE 根据客户所属 VPN 实例查询目的路由，为报文封装私网标签及适当的公网标签。中间 P 路由器 根据外层 MPLS 标签完成标签交换，无需学习客户 VPN 路由，不需要运行 BGP。出口 PE 根据私网标签确定对应 VRF 中的转发信息，并将数据包发送给目标 CE，最终到达目的站点。上述拓扑图的逻辑拓扑图如下所示。
+
+<div align="center">
+    <img src="mpls_static/46.png" width="650"/>
+</div>
+
+具体 AR1 上的配置如下所示：
+
+```java{.line-numbers}
+#
+ sysname AR1
+#
+ip vpn-instance vpna
+ ipv4-family
+  route-distinguisher 100:1
+  vpn-target 1:1 export-extcommunity
+  vpn-target 1:1 import-extcommunity
+#
+mpls lsr-id 10.1.1.1
+mpls
+#
+mpls ldp
+#
+interface GigabitEthernet0/0/0
+ ip binding vpn-instance vpna
+ ip address 172.16.1.1 255.255.255.0 
+#
+interface GigabitEthernet0/0/1
+ ip address 10.1.12.1 255.255.255.0 
+ mpls
+ mpls ldp
+#
+interface LoopBack0
+ ip address 10.1.1.1 255.255.255.255 
+#
+bgp 100
+ router-id 10.1.1.1
+ undo default ipv4-unicast
+ peer 10.4.4.4 as-number 100 
+ peer 10.4.4.4 connect-interface LoopBack0
+ #
+ ipv4-family unicast
+  undo synchronization
+  undo peer 10.4.4.4 enable
+ # 
+ ipv4-family vpnv4
+  policy vpn-target
+  peer 10.4.4.4 enable
+ #
+ ipv4-family vpn-instance vpna 
+  import-route ospf 2
+#
+ospf 1 router-id 1.1.1.1 
+ area 0.0.0.0 
+  network 10.1.1.1 0.0.0.0 
+  network 10.1.12.0 0.0.0.255 
+#
+ospf 2 router-id 10.1.1.1 vpn-instance vpna
+ import-route bgp
+ area 0.0.0.0 
+  network 172.16.1.0 0.0.0.255 
+```
+
+AR4 上的配置如下所示：
+
+```java{.line-numbers}
+#
+ sysname AR4
+#
+ip vpn-instance vpna
+ ipv4-family
+  route-distinguisher 100:1
+  vpn-target 1:1 export-extcommunity
+  vpn-target 1:1 import-extcommunity
+#
+mpls lsr-id 10.4.4.4
+mpls
+#
+mpls ldp
+#
+interface GigabitEthernet0/0/0
+ ip address 10.1.34.4 255.255.255.0 
+ mpls
+ mpls ldp
+#
+interface GigabitEthernet0/0/1
+ ip binding vpn-instance vpna
+ ip address 172.16.2.1 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.4.4.4 255.255.255.255 
+#
+bgp 100
+ router-id 10.4.4.4
+ undo default ipv4-unicast
+ peer 10.1.1.1 as-number 100 
+ peer 10.1.1.1 connect-interface LoopBack0
+ peer 10.4.4.4 as-number 100 
+ #
+ ipv4-family unicast
+  undo synchronization
+  undo peer 10.1.1.1 enable
+  undo peer 10.4.4.4 enable
+ # 
+ ipv4-family vpnv4
+  policy vpn-target
+  peer 10.1.1.1 enable
+ #
+ ipv4-family vpn-instance vpna 
+  import-route ospf 2
+#
+ospf 1 router-id 4.4.4.4 
+ area 0.0.0.0 
+  network 10.1.34.0 0.0.0.255 
+  network 10.4.4.4 0.0.0.0 
+#
+ospf 2 router-id 10.4.4.4 vpn-instance vpna
+ import-route bgp
+ area 0.0.0.0 
+  network 172.16.2.0 0.0.0.255 
+```
+
+从上述 PE1 和 PE2 的配置中可以看到，如果在 **`PE-CE`** 之间配置 OSPF 协议，那么需要实现 OSPF 和 MP-BGP 之间的双向引入。将 OSPF 路由引入 MP-BGP 是因为需要将 PE1 从 CE1 学到的 OSPF 路由引入 BGP，使其能够通过 MP-BGP VPNv4 通告给 PE2。而将 MP-BGP 路由引入 OSPF，是为了让 PE2 从 MP-BGP 学到的远端 VPN 路由引入本地 OSPF，使 CE2 能够学习到 CE1 的网段。
+
+在配置完成之后，在 PE1 和 PE2 上查看 BGP VPNv4 邻居建立的情况，可以看到 PE1 和 PE2 之间的 BGP VPNv4 邻居已经建立成功，状态为 Established。
+
+```java{.line-numbers}
+<AR1>display bgp vpnv4 all peer 
+ BGP local router ID : 10.1.1.1
+ Local AS number : 100
+ Total number of peers : 1		  Peers in established state : 1
+  Peer            V          AS  MsgRcvd  MsgSent  OutQ  Up/Down       State Pre fRcv
+  10.4.4.4        4         100       46       47     0 00:42:05 Established     2
+<AR4>display bgp vpnv4 all peer 
+ BGP local router ID : 10.4.4.4
+ Local AS number : 100
+ Total number of peers : 1		  Peers in established state : 1
+  Peer            V          AS  MsgRcvd  MsgSent  OutQ  Up/Down       State Pre fRcv
+  10.1.1.1        4         100       49       49     0 00:45:22 Established     2
+```
+
+### 4.2 控制层面
+
+这里以控制层面中 Site1 中 **`1.1.5.1/32`** 的路由信息发送至 Site2 中为例，分析一下整个路由传递的过程。
+
+第 1 步：首先 CE1 通过 OSPF 协议将网络 **`1.1.5.1/32`** 以 IPv4 路由的方式发送给 PE1，可以在 PE1 的 VPN 实例 vpnA 的路由表中查看到该路由，如下输出所示，可以看到 PE1 通过 OSPF 协议学习到 **`1.1.5.1/32`** 的路由信息，并且该路由的下一跳为 CE1 的地址。
+
+```java{.line-numbers}
+<AR1>display ip routing-table vpn-instance vpna
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: vpna
+         Destinations : 7        Routes : 7        
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  OSPF    10   1           D   172.16.1.2      GigabitEthernet0/0/0
+        1.1.6.1/32  IBGP    255  2          RD   10.4.4.4        GigabitEthernet0/0/1
+```
+
+第 2 步：PE1 将 IPv4 路由 **`1.1.5.1/32`** 引入到 MP-BGP，形成 VPNv4 路由，VPNv4 路由将携带该客户的 RD（**`100:1`**）以及 Export RT（**`1:1`**）值。同时，MP-BGP 还会为这条 VPNv4 路由分配一个私网标签。下面的输出信息显示了 **<font color="red">`Received/Applied: NULL/1028`，也就是说 PE1 未从其他 PE 接收此路由的 VPN 标签，本地为该路由分配的标签为 1028</font>**。
+
+```java{.line-numbers}
+<AR1>display bgp vpnv4 all routing-table 1.1.5.1 32
+ BGP local router ID : 10.1.1.1
+ Local AS number : 100
+
+ Total routes of Route Distinguisher(100:1): 1
+ BGP routing table entry information of 1.1.5.1/32:
+ Imported route. 
+ Label information (Received/Applied): NULL/1028
+ From: 0.0.0.0 (0.0.0.0)
+ Route Duration: 00h49m56s  
+ Direct Out-interface: GigabitEthernet0/0/0
+ Original nexthop: 172.16.1.2
+ Qos information : 0x0
+ Ext-Community:RT <1 : 1>, OSPF DOMAIN ID <0.0.0.0 : 0>,  OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.1.1.1 : 0>
+ AS-path Nil, origin incomplete, MED 2, pref-val 0, valid, local, best, select,  pre 255
+ Advertised to such 1 peers: 10.4.4.4
+
+ VPN-Instance vpna, Router ID 10.1.1.1:
+ Total Number of Routes: 1
+ BGP routing table entry information of 1.1.5.1/32:
+ Imported route. 
+ From: 0.0.0.0 (0.0.0.0)
+ Route Duration: 00h49m56s  
+ Direct Out-interface: GigabitEthernet0/0/0
+ Original nexthop: 172.16.1.2
+ Qos information : 0x0
+ Ext-Community:OSPF DOMAIN ID <0.0.0.0 : 0>, OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.1.1.1 : 0>
+ AS-path Nil, origin incomplete, MED 2, pref-val 0, valid, local, best, select, pre 10
+ Not advertised to any peer yet
+```
+
+第 3 步，PE1 将这个 **`1.1.5.1/32`** VPNv4 路由通告给 MP-iBGP 邻居 PE2。
+
+第 4 步：PE2 收到 PE1 通告的 VPNv4 路由后，将路由携带的 **`Export RT 1:1`** 与本地 VPN 实例 vpna 的 **`Import RT 1:1`** 进行匹配。匹配成功后，将该 VPNv4 路由还原为不含 RD 的 IPv4 路由 **`1.1.5.1/32`**，并导入 vpna 路由表。同时，PE2 保留 PE1 分配的私网标签 1028（**`Label information (Received/Applied): 1028/NULL`**），用于后续 MPLS VPN 数据转发。
+
+从路由详细信息可以看出，该路由的协议为 IBGP，BGP 下一跳为 PE1（**`10.1.1.1`**），私网标签为 1028。经过递归解析后，实际转发下一跳为 **`10.1.34.3`**，**`Flags: RD`** 表明该路由已完成递归解析并下发 FIB，说明 PE2 已具备向 PE1 转发该 VPN 业务流量所需的路由与标签信息。
+
+```java{.line-numbers}
+<AR4>display bgp vpnv4 all routing-table 1.1.5.1
+ BGP local router ID : 10.4.4.4
+ Local AS number : 100
+
+ Total routes of Route Distinguisher(100:1): 1
+ BGP routing table entry information of 1.1.5.1/32:
+ Label information (Received/Applied): 1028/NULL
+ From: 10.1.1.1 (10.1.1.1)
+ Route Duration: 01h08m33s  
+ Relay IP Nexthop: 10.1.34.3
+ Relay IP Out-Interface: GigabitEthernet0/0/0
+ Relay Tunnel Out-Interface: GigabitEthernet0/0/0
+ Relay token: 0x1
+ Original nexthop: 10.1.1.1
+ Qos information : 0x0
+ Ext-Community:RT <1 : 1>, OSPF DOMAIN ID <0.0.0.0 : 0>, OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.1.1.1 : 0>
+ AS-path Nil, origin incomplete, MED 2, localpref 100, pref-val 0, valid, internal, best, select, pre 255, IGP cost 3
+ Not advertised to any peer yet
+
+<AR4>display ip vpn-instance verbose vpna
+ VPN-Instance Name and ID : vpna, 1
+  Interfaces : GigabitEthernet0/0/1
+ Address family ipv4
+  Create date : 2026/11/18 12:53:03 UTC-08:00    
+  Up time : 0 days, 01 hours, 12 minutes and 16 seconds
+  Route Distinguisher : 100:1
+  Export VPN Targets :  1:1
+  Import VPN Targets :  1:1
+  Label Policy : label per route
+  Log Interval : 5
+
+<AR4>display ip routing-table vpn-instance vpna 1.1.5.1 verbose 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+
+Destination: 1.1.5.1/32
+     Protocol: IBGP             Process ID: 0
+   Preference: 255                    Cost: 2
+      NextHop: 10.1.1.1          Neighbour: 10.1.1.1
+        State: Active Adv Relied       Age: 01h12m01s
+          Tag: 0                  Priority: low
+        Label: 1028                QoSInfo: 0x0
+   IndirectID: 0x3              
+ RelayNextHop: 10.1.34.3         Interface: GigabitEthernet0/0/0
+     TunnelID: 0x1                   Flags: RD
+```
+
+第 5 步：PE2 将来自 Site1 的私网路由发布给 CE2。下面的输出显示了 CE2 已经接收到该路由。
+
+```java{.line-numbers}
+<AR6>display ip routing-table 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public
+         Destinations : 10       Routes : 10       
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  OSPF    10   3           D   172.16.2.1      GigabitEthernet0/0/0
+```
+
+最后总结如下：在 MPLS L3VPN 的控制平面中，CE1 首先通过 OSPF 将本地 Loopback0 路由 **`1.1.5.1/32`** 通告给 PE1，PE1 通过绑定 VPN 实例 vpna 的 OSPF 进程 2 学习该路由，并将其安装到 vpna 实例路由表中，下一跳为 CE1 的接口地址 **`172.16.1.2`**。随后，PE1 通过 **`import-route ospf 2`** 将该 IPv4 路由引入 BGP，生成携带 **`RD 100:1`**、**`Export RT 1:1`** 及 OSPF 相关扩展团体属性的 VPNv4 路由，同时为其分配私网标签 1028，并通过 MP-iBGP 将该路由通告给 PE2。
+
+PE2 收到 VPNv4 路由后，将其 **`Export RT 1:1`** 与本地 VPN 实例 vpna 的 **`Import RT 1:1`** 进行匹配，匹配成功后将其导入 vpna 路由表，形成一条目的网络为 **`1.1.5.1/32`** 的 IBGP 路由，同时保留收到的私网标签 1028。该路由的 BGP 下一跳为 PE1（**`10.1.1.1`**），经过 MPLS 隧道递归解析后，实际转发下一跳为 **`10.1.34.3`**。最后，PE2 通过 OSPF 进程 2 下的 **`import-route bgp`** 将远端 VPN 路由引入 OSPF，并通过 OSPF LSA 通告给 CE2，使 CE2 最终学习到 **`1.1.5.1/32`** 的 OSPF 路由，下一跳为 PE2 的接口地址 **`172.16.2.1`**。
+
+### 4.3 数据层面
+
+在实现了私网路由的交换后，再看一下如何通过该 VPN 来传递业务流量。首先数据流由 CE 到 PE 使用的是 IP 转发。**<font color="red">而数据流要经过骨干网，因为骨干网内部 P 路由器没有私网路由，也就是没办法使用 IP 转发，这时就应该想到用 MPLS 标签转发技术</font>**。在 IP 报文进入到 MPLS 骨干网的 PE 后封装上一个公网标签，该标签对应着穿越整个公网的 LSP，数据包通过 LSP 隧道转发到出站的 PE，中间的 P 路由器只使用标签交换转发方式，而不需要 IP 转发，数据包的入站 PE 和出站 PE 同时使用了 IP 转发和标签转发。
+
+在公网中，建立公网 LSP 的方法是通过 LDP 协议为公网中的 IGP 路由映射标签，然后再通告标签等步骤完成。当数据包穿越公网到达出站 PE 时，由于在出站 PE 上可能同时连接着多个不同的 VPN 用户，当数据包从公网接口进入出站 PE 时，出站 PE 需要判断出这个数据包是要转发给哪个 VPN 实例的，也就是要从哪个接口转发给哪个 CE。这时就用到了前面提到的私网标签，MP-BGP 协议在通告 VPNv4 路由时会给每条 VPN 路由分配一个私网标签，使得出站 PE 可以根据此私网标签决定数据包如何转发。
+
+因此，**<font color="red">经过 MPLS VPN 骨干网络的业务数据流将会携带两层标签，外层标签叫公网标签，用来穿越整个公网到达出站的 PE；内层标签叫私网标签，用来在出站的 PE 上辨认数据包该送往哪个 VPN 实例</font>**，下面把数据转发过程分为 3 个步骤来进行详细分析。
+
+#### 4.3.1 数据由 CE 转发给入站的 PE
+
+如图所示，假设现在 Site2 中的主机需要发送业务数据流到 Site1 中。首先，CE2 将用户的 IP 报文通过普通的 IP 转发方式转发到服务商的 PE2。PE2 收到这个 IP 报文后，会根据报文到达的接口判断出属于哪个 VPN 实例，然后查询该 VPN 实例对应的转发表。
+
+```java{.line-numbers}
+<AR4>display ip routing-table vpn-instance vpna 1.1.5.1 verbose 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+
+Destination: 1.1.5.1/32
+     Protocol: IBGP             Process ID: 0
+   Preference: 255                    Cost: 2
+      NextHop: 10.1.1.1          Neighbour: 10.1.1.1
+        State: Active Adv Relied       Age: 02h18m42s
+          Tag: 0                  Priority: low
+        Label: 1028                QoSInfo: 0x0
+   IndirectID: 0x3              
+ RelayNextHop: 10.1.34.3         Interface: GigabitEthernet0/0/0
+     TunnelID: 0x1                   Flags: RD
+```
+
+在转发表中可以查找到转发该报文的公网下一跳（即对端 PE 的 Loopback 接口地址 **`10.1.1.1/32`**）及私网标签 1028，PE2 封装上私网标签后，还需要再封装一个公网标签，**<font color="red">于是 PE2 通过查询公网标签转发表（LSP 转发表）找到到达下一跳地址（对端 PE 的 Loopback 接口地址 **`10.1.1.1/32`**）的标签</font>**，然后将其作为公网标签封装在私网标签的外层。两层标签都封装好后，PE2 就将该数据包转发到 MPLS 网络中。
+
+```java{.line-numbers}
+<AR4>display mpls ldp lsp 
+ LDP LSP Information
+ -------------------------------------------------------------------------------
+ DestAddress/Mask   In/OutLabel    UpstreamPeer    NextHop         OutInterface
+ -------------------------------------------------------------------------------
+ 10.1.1.1/32        NULL/1025      -               10.1.34.3       GE0/0/0
+ 10.1.1.1/32        1024/1025      10.3.3.3        10.1.34.3       GE0/0/0
+```
+
+从上述的 LDP LSP 信息中可以看到，第一条 **`LSR NULL/1025`**，PE2 作为入站 LSR，当 PE2 收到 CE2 发来的普通 IPv4 报文时，首先获得目的前缀 **`1.1.5.1/32`** 对应的私网标签 1028。随后根据 BGP 下一跳 **`10.1.1.1`** 递归到对应的公网 LDP LSP，找到对应的公网标签 1025，并且对业务报文执行公网标签压入（Push）操作。
+
+```java{.line-numbers}
+<AR4>display fib vpn-instance vpna 1.1.5.1
+  Route Entry Count: 1
+Destination/Mask   Nexthop         Flag  TimeStamp     Interface      TunnelID
+1.1.5.1/32         10.1.34.3       DGHU  t[67]         GE0/0/0        0x1	
+<AR4>display tunnel-info tunnel-id 0x1
+Tunnel ID:                    0x1
+Tunnel Token:                 1
+Type:                         lsp
+Destination:                  10.1.1.1
+Out Slot:                     0
+Instance ID:                  0
+Out Interface:                GigabitEthernet0/0/0
+Out Label:                    1025
+Next Hop:                     10.1.34.3
+Lsp Index:                    6144
+<AR4>display mpls lsp include 10.1.1.1 32 verbose 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+  No                  :  1
+  VrfIndex            :        
+  Fec                 :  10.1.1.1/32
+  Nexthop             :  10.1.34.3
+  In-Label            :  NULL
+  Out-Label           :  1025
+  In-Interface        :  ----------
+  Out-Interface       :  GigabitEthernet0/0/0
+  LspIndex            :  6144
+  Token               :  0x1
+  FrrToken            :  0x0
+  LsrType             :  Ingress
+  Outgoing token      :  0x0
+  Label Operation     :  PUSH
+  Mpls-Mtu            :  1500
+  TimeStamp           :  10434sec
+  Bfd-State           :  ---
+  BGPKey              :  ------
+```
+
+在前文有说到，当 IP 报文由入站 PE 进入 MPLS 网络后会通过 LSP 转发，并且通过中间的 P 设备查找标签转发表进行标签交换，最终通过公网 LSP 转发到出站的 PE。具体的示意图如下所示：
+
+<div align="center">
+    <img src="mpls_static/47.png" width="650"/>
+</div>
+
+#### 4.3.2 数据由入站的 PE 转发给出站 PE
+
+在前文有说到，当 IP 报文由入站 PE 进入 MPLS 网络后会通过 LSP 转发，并且通过中间的 P 设备查找标签转发表进行标签交换，最终通过公网 LSP 转发到出站的 PE。
+
+#### 4.3.3 数据由出站的 PE 转发给远端的 CE
+
+**<font color="red">当数据包由 MPLS 骨干网转发到达出站 PE1 时，只剩下一层私网标签，这是因为 PHP（倒数第二跳弹出）的原因，公网标签已经在倒数第二跳的 P1 设备剥离掉了</font>**。出站 PE 利用该私网标签判断出该数据包去往的 VPN 实例，在查找到相应的 VPN 实例转发表后，移除该私网标签，将报文还原为 IP 报文后再转发给 CE，如下图所示。
+
+<div align="center">
+    <img src="mpls_static/48.png" width="700"/>
+</div>
+
+至此，客户通过 MPLS VPN 完成了私网站点之间的流量转发，可以发现 VPN 业务的数据流是经过骨干网的 LSP 隧道方式进行转发的，从而保证了客户数据的安全性。传递 VPN 业务数据流时需要使用到两层标签（私网标签+公网标签），公网标签用于帮助 VPN 业务数据流穿越公网中的 LSP，而私网标签用于 LSP 的出站 PE 进行判断该向哪个 VPN 实例进行转发。
+
+### 4.2 CE-PE 之间运行静态路由
+
+华为 MPLS L3VPN：import-route static 到底是什么意思？
+
+不是把静态路由引入 vpna 实例的路由表，而是把 vpna 实例路由表中的静态路由引入 BGP，使其能够通过 MP-BGP VPNv4 发布给远端 PE。
+
+你这里实际上混淆了两个不同的操作：
+
+配置 VPN 实例的静态路由：通过 ip route-static vpn-instance vpna ...，让静态路由进入 vpna 的路由表。
+
+将 VPN 实例的静态路由引入 BGP：通过 bgp 100 下的 ipv4-family vpn-instance vpna → import-route static，让 BGP 学习该 VPN 实例中的静态路由。
+
+### 4.3 CE-PE 之间运行 BGP 协议
 
