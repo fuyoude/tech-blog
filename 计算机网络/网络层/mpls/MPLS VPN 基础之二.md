@@ -583,7 +583,7 @@ ospf 1 router-id 4.4.4.4
   172.16.2.2      4       65002        8        9     0 00:05:32 Established     1
 ```
 
-### 6.1 控制层面
+### 6.2 控制层面
 
 这里以 Site2 中的 **`1.1.6.1/32`** 路由传递至 Site1 为例，分析 PE–CE 之间采用 BGP 协议时，MPLS L3VPN 控制平面的路由传播过程。与之前的实验不同，本次实验中 **<font color="red">CE1 与 PE1、CE2 与 PE2 分别建立 eBGP 邻居关系，通过 BGP 路由协议动态交换客户 IPv4 路由，而 PE1 与 PE2 之间仍通过 MP-iBGP VPNv4 交换 VPN 路由信息</font>**。
 
@@ -718,3 +718,170 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
 控制平面总结：在 MPLS L3VPN 的 BGP 实验中，PE–CE 之间采用 eBGP 交换客户 IPv4 路由，而 PE–PE 之间仍通过 MP-iBGP VPNv4 交换 VPN 路由。首先，CE2（AS 65002）将本地 Loopback0 路由 **`1.1.6.1/32`** 发布到 BGP，并通过与 PE2（AS 100）建立的 eBGP 邻居关系，将该路由通告给 PE2。PE2 在 VPN 实例 vpna 对应的 BGP IPv4 地址族中学习到该客户路由。随后，PE2 根据 VPN 实例的配置，将该 IPv4 BGP 路由转换为携带 **`RD 100:1`**、**`Export RT 1:1`** 及私网标签 1027 的 VPNv4 路由，并通过 MP-iBGP 通告给 PE1。
 
 PE1 收到 VPNv4 路由后，将其 **`Export RT 1:1`** 与本地 VPN 实例 vpna 的 **`Import RT 1:1`** 进行匹配，匹配成功后将路由导入本地 VPN 实例 vpna 路由表，形成目的网络为 **`1.1.6.1/32`** 的 IBGP 路由，同时保留 PE2 通告的私网标签 1027。该路由的 BGP 下一跳为 PE2 的 Loopback0 地址 **`10.4.4.4`**，经过递归解析后，实际转发下一跳为 P1（**`10.1.12.2`**）。最后，PE1 通过与 CE1（AS 65001）建立的 eBGP 邻居关系，将该远端客户路由以普通 IPv4 BGP 路由的形式通告给 CE1，使 CE1 动态学习到 **`1.1.6.1/32`**。
+
+### 6.3 数据平面
+
+由于运营商骨干网中的 P 路由器不维护客户 VPN 路由，因此无法直接依靠客户目的 IP 地址完成跨站点转发，需要利用 MPLS 标签交换技术。业务报文进入 MPLS 骨干网时，入站 PE 通常会封装两层标签：**<font color="red">外层公网标签用于引导报文沿 LDP LSP 到达远端 PE，内层私网标签用于出站 PE 识别对应的 VPN 转发信息</font>**。
+
+这里以 Site1 中 CE1 的 Loopback0 地址 **`1.1.5.1`** 向 Site2 中 CE2 的 Loopback0 地址 **`1.1.6.1`** 发送数据包为例，分析 PE–CE 使用 BGP 协议时，整个 MPLS L3VPN 数据平面的转发过程。
+
+#### 6.3.1 数据由 CE1 转发给入站 PE1
+
+当 CE1（AR5）需要向 Site2 的 **`1.1.6.1/32`** 发送数据时，首先查询本地 IPv4 路由表。由于 CE1 已经通过与 PE1 建立的 eBGP 邻居关系，学习到目的网络为 **`1.1.6.1/32`** 的 BGP 路由，因此 CE1 将普通 IPv4 报文转发给 PE1，此时数据包不携带 MPLS 标签。
+
+```java{.line-numbers}
+[AR5]display ip routing-table 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: Public
+         Destinations : 9        Routes : 9        
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  Direct  0    0           D   127.0.0.1       LoopBack0
+        1.1.6.1/32  EBGP    255  0           D   172.16.1.1      GigabitEthernet0/0/0
+```
+
+PE1（AR1）收到 CE1 发来的普通 IPv4 报文后，根据入接口 **`GE0/0/0`** 绑定的 VPN 实例 vpna 查询对应的 VPN 转发表，匹配到目的网络为 **`1.1.6.1/32`** 的 IBGP 路由，获取 PE2 通过 MP-BGP VPNv4 通告的私网标签 1027，以及 BGP 下一跳 PE2 的 Loopback0 地址 **`10.4.4.4`**。
+
+```java{.line-numbers}
+[AR1]display ip routing-table vpn-instance vpna
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: vpna
+         Destinations : 6        Routes : 6        
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  EBGP    255  0           D   172.16.1.2      GigabitEthernet0/0/0
+        1.1.6.1/32  IBGP    255  0          RD   10.4.4.4        GigabitEthernet0/0/1
+[AR1]display ip routing-table vpn-instance vpna 1.1.6.1 verbose 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+
+Destination: 1.1.6.1/32
+     Protocol: IBGP             Process ID: 0
+   Preference: 255                    Cost: 0
+      NextHop: 10.4.4.4          Neighbour: 10.4.4.4
+        State: Active Adv Relied       Age: 00h21m57s
+          Tag: 0                  Priority: low
+        Label: 1027                QoSInfo: 0x0
+   IndirectID: 0x3              
+ RelayNextHop: 10.1.12.2         Interface: GigabitEthernet0/0/1
+     TunnelID: 0x5                   Flags: RD
+```
+
+由于 BGP 下一跳 **`10.4.4.4`** 并非直连，PE1 需要关联到达 PE2（**`10.4.4.4`**）的公网 LDP LSP，确定对应的公网出标签及转发路径。根据下面的输出，FEC 为 **`10.4.4.4/32`** 的 LSP 中，**`NULL/1025`** 表明 PE1 作为该公网 LSP 的入站 LSR，无须匹配公网入标签，而是使用出标签 1025 对业务报文执行 PUSH（压入标签） 操作。与此同时，PE2 通过 MP-BGP VPNv4 为本地客户路由 **`1.1.6.1/32`** 分配并通告私网标签 1027。那么 PE1 首先为原始 IPv4 报文压入内层私网标签 1027，再压入外层公网标签 1025，形成如下双层标签结构：**`[公网标签 1025][私网标签 1027][原始 IPv4 报文]`**。
+
+```java{.line-numbers}
+<AR1>display mpls lsp 
+-------------------------------------------------------------------------------
+                 LSP Information: BGP  LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+1.1.5.1/32         1027/NULL     -/-                            vpna           
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+10.2.2.2/32        NULL/3        -/GE0/0/1                                     
+10.2.2.2/32        1024/3        -/GE0/0/1                                     
+10.3.3.3/32        NULL/1024     -/GE0/0/1                                     
+10.3.3.3/32        1025/1024     -/GE0/0/1                                     
+10.4.4.4/32        NULL/1025     -/GE0/0/1                                     
+10.4.4.4/32        1026/1025     -/GE0/0/1                                     
+10.1.1.1/32        3/NULL        -/-                                           
+<AR1>display mpls lsp include 10.4.4.4 32 verbose 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+  No                  :  1
+  VrfIndex            :        
+  Fec                 :  10.4.4.4/32
+  Nexthop             :  10.1.12.2
+  In-Label            :  NULL
+  Out-Label           :  1025
+  In-Interface        :  ----------
+  Out-Interface       :  GigabitEthernet0/0/1
+  LspIndex            :  6148
+  Token               :  0x5
+  FrrToken            :  0x0
+  LsrType             :  Ingress
+  Outgoing token      :  0x0
+  Label Operation     :  PUSH
+  Mpls-Mtu            :  1500
+  TimeStamp           :  1800sec
+  Bfd-State           :  ---
+  BGPKey              :  ------
+```
+
+随后，PE1 将封装完成的 MPLS 报文通过 **`GE0/0/1`** 转发给 P1（**`10.1.12.2`**），使业务数据进入 MPLS 骨干网。
+
+#### 6.3.2 数据由入站 PE1 经 P1、P2 转发至出站 PE2
+
+当 PE1 将双层标签报文发送到 MPLS 骨干网后，中间的 P1 和 P2 路由器只需根据报文最外层的公网标签查询 MPLS 标签转发表，无需查询客户 VPN 路由，也不需要识别内层私网标签。
+
+首先，P1（AR2）收到 PE1 发送的 MPLS 报文后，根据公网入标签查找 MPLS 标签转发表，确定对应的出标签以及转发接口。P1 收到公网标签为 1025 的报文后，执行 SWAP（标签交换） 操作，将入标签 1025 替换为出标签 1025，随后通过 **`GE0/0/1`** 转发给下一跳 P2（**`10.1.23.3`**）。
+
+```java{.line-numbers}
+<AR2>display mpls lsp 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+10.2.2.2/32        3/NULL        -/-                                           
+10.3.3.3/32        NULL/3        -/GE0/0/1                                     
+10.3.3.3/32        1024/3        -/GE0/0/1                                     
+10.4.4.4/32        NULL/1025     -/GE0/0/1                                     
+10.4.4.4/32        1025/1025     -/GE0/0/1                                     
+10.1.1.1/32        NULL/3        -/GE0/0/0                                     
+10.1.1.1/32        1026/3        -/GE0/0/0  
+```
+
+接下来，P2（AR3）收到 MPLS 报文后，同样根据最外层公网标签查询 MPLS 标签转发表。其中，出标签 3 表示 Implicit NULL（隐式空标签）。由于 P2 是该公网 LSP 的倒数第二跳，因此执行 PHP 操作，直接移除报文最外层的公网标签。随后，P2 将只携带内层私网标签的 MPLS 报文通过 **`GE0/0/1`** 转发给出站 PE2（AR4）。
+
+```java{.line-numbers}
+<AR3>display mpls lsp 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+10.2.2.2/32        NULL/3        -/GE0/0/0                                     
+10.2.2.2/32        1024/3        -/GE0/0/0                                     
+10.3.3.3/32        3/NULL        -/-                                           
+10.4.4.4/32        NULL/3        -/GE0/0/1                                     
+10.4.4.4/32        1025/3        -/GE0/0/1                                     
+10.1.1.1/32        NULL/1026     -/GE0/0/0                                     
+10.1.1.1/32        1026/1026     -/GE0/0/0  
+```
+
+#### 6.3.3 数据由出站 PE2 转发给远端 CE2
+
+当数据包经过 MPLS 骨干网到达出站 PE2 时，由于 P2 已经执行 PHP 操作，因此报文只剩下一层私网标签。PE2 收到报文后，根据该私网标签确定报文对应的 VPN 实例、客户路由及转发方式。在下面的输出中，**`1027/NULL`** 表示 PE2 为 VPN 实例 vpna 中的 **`1.1.6.1/32`** 路由分配了本地私网入标签 1027，且不需要继续封装 MPLS 出标签。
+
+```java{.line-numbers}
+<AR4>display mpls lsp 
+-------------------------------------------------------------------------------
+                 LSP Information: BGP  LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name       
+1.1.6.1/32         1027/NULL     -/-                            vpna    
+```
+
+PE2 根据收到的私网标签匹配相应的 VPN 转发信息，移除私网标签，将数据包还原为普通 IPv4 报文。然后根据 vpna 实例中的路由条目转发给 CE2（AR6）。
+
+```java{.line-numbers}
+<AR4>display ip routing-table vpn-instance vpna 
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Tables: vpna
+         Destinations : 6        Routes : 6        
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  IBGP    255  0          RD   10.1.1.1        GigabitEthernet0/0/0
+        1.1.6.1/32  EBGP    255  0           D   172.16.2.2      GigabitEthernet0/0/1
+```
+
+数据平面总结：在 MPLS L3VPN 的 BGP 实验中，当 Site1 向 Site2 的 **`1.1.6.1/32`** 发送业务数据时，CE1 首先根据通过 eBGP 动态学习到的路由，将普通 IPv4 报文转发给 PE1（**`172.16.1.1`**）。PE1 收到报文后，根据入接口绑定的 VPN 实例 vpna 查询 VPN 转发表，匹配到目的网络为 **`1.1.6.1/32`** 的 IBGP 路由，获得 PE2 通过 MP-BGP VPNv4 通告的私网标签 1027，以及 BGP 下一跳 PE2 的 Loopback0 地址 **`10.4.4.4`**。由于 BGP 下一跳并非直连，PE1 关联到达 PE2 的公网 LDP LSP，获取对应的公网出标签 1025。
+
+PE2 为远端客户路由分配的私网标签为 1027，那么 PE1 首先压入内层私网标签 1027，再压入外层公网标签 1025，将双层 MPLS 标签报文转发给 P1。P1 收到报文后，根据最外层公网标签查询 MPLS 标签转发表，执行 SWAP 操作，将公网标签交换后继续转发给 P2。P2 作为该公网 LSP 的倒数第二跳，根据对应的隐式空标签 3 执行 PHP 操作，移除外层公网标签，仅保留私网标签，并将报文转发给 PE2。
+
+最后，PE2 根据收到的私网标签查找对应的 VPN 转发信息，移除私网标签，将报文还原为普通 IPv4 报文。最终 PE2 将报文通过 **`GE0/0/1`** 转发给 CE2。
+
