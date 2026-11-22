@@ -132,6 +132,8 @@ ip route-static vpn-instance vpna 1.1.6.1 255.255.255.255 172.16.2.2
 
 **`ip route-static vpn-instance vpna 1.1.5.1 255.255.255.255 172.16.1.2`** 表示在 PE1 的 vpna 实例中配置了一条静态路由，指向 CE1 的地址。
 
+因此，总结来说，要为 VPN 实例设置静态路由，必须在静态路由后面关联上相应的 VPN 实例。**<font color="red">要想其他 PE 学习到该静态路由，需要在 VPN 实例中将其引入到 BGP 中，从而形成 VPNv4 路由</font>**，再通过 MP-BGP 通告给其他 PE，如下配置，在 PE1 上将 VPN 实例中的静态路由引入到 MP-BGP 中。
+
 在配置完成之后，在 PE1 和 PE2 上查看 BGP VPNv4 邻居建立的情况，可以看到 PE1 和 PE2 之间的 BGP VPNv4 邻居已经建立成功，状态为 Established。
 
 ```java{.line-numbers}
