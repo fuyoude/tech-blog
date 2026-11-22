@@ -50,18 +50,18 @@ OSPF 协议是 PE 和 CE 之间路由协议的另一种选择，如果要将 VPN
 **这样会导致用户站点 Area0 学不到其他站点的路由**，上述网络拓扑图的逻辑结构如下：
 
 ```java{.line-numbers}
-                  MPLS VPN Backbone
-               （MP-BGP 超级骨干区域）
-                   │           │
-                  PE1         PE2
-                   │           │
-                 Area 1      Area 2
-                   │           │
-                  CE1         CE2
-                   │           │
-                 Area 0      Area 0
-                   │           │
-                 Site1       Site2
+                      MPLS VPN Backbone
+                   （MP-BGP 超级骨干区域）
+                       │           │
+                      PE1         PE2
+                       │           │
+                     Area 1      Area 2
+                       │           │
+                      CE1         CE2
+                       │           │
+                     Area 0      Area 0
+                       │           │
+                     Site1       Site2
 ```
 
 **（1）Site1 发布路由到 Site2**
@@ -185,61 +185,184 @@ OSPF 进程的域 ID 包含在此进程生成的路由中，在将 OSPF 路由�
 
 #### 7.4.1 普通 CE 会接收 DN 置位的 LSA 并计算路由
 
+<div align="center">
+    <img src="mpls_static/45.png" width="750"/>
+</div>
 
+在上述网络拓扑中，PE-CE 之间运行 OSPF 协议，远端站点 CE2 的客户路由 **`1.1.6.1/32`** 可能先通过 OSPF 交给 PE2，再由 PE2 转换成 MP-BGP VPN 路由穿越 VPN Backbone。当这条 VPN 路由到达 PE1 后，PE1 又把它转换成 OSPF 路由发送给 CE1。当 PE1 把这种 VPN 路由重新发布成 **`Type 3/Type 5`** 传递给 CE1 时，会在相应 LSA 中设置 DN Bit。通过下面的输出可以看到，PE1 发布给 CE1 的 **`1.1.6.1/32`** Type3 LSA 带有 DN 标志位。
 
-在 MPLS L3VPN 的 PE-CE OSPF 场景中，远端站点的一条客户路由可能先由远端 CE 通过 OSPF 交给 PE，再由 PE 转换成 MP-BGP VPN 路由穿越 VPN Backbone；当这条 VPN 路由到达本地 PE 后，本地 PE又需要把它重新转换成 OSPF 路由发送给本地 CE。根据华为的 OSPF VPN 原理说明，当 PE 把这种 VPN 路由重新发布成 Type 3、Type 5 或 Type 7 LSA 时，会在相应 LSA 中设置 DN Bit。也就是说，普通 CE 正常收到 PE 下发的远端 VPN 路由时，本来就可能收到 DN=1 的 LSA。
+```java{.line-numbers}
+<AR1>display ospf lsdb summary 1.1.6.1
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Sum-Net
+  Ls id     : 1.1.6.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 107 
+  Len       : 28 
+  Options   :  E  DN  
+  seq#      : 80000003 
+  chksum    : 0x1fa3
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 2
+  Priority  : Low
+```
 
-华为在 OSPF VPN 原理文档里对 DN Bit 的描述非常有针对性：执行 DN Bit 检查的是 OSPF 多实例进程，典型设备是 PE 或 MCE。文档给出的防环模型也是 PE1 将 DN=1 的 LSA 发给 CE，LSA经过 CE 网络传播后重新到达 PE2，然后由 PE2 的 OSPF 多实例进程检查 DN 位并阻止其形成路由。
+然后 CE1 作为普通的 CE 会接收这个 Type3 LSA，然后计算并形成 OSPF 路由，如下所示。
 
+```java{.line-numbers}
+<AR5>display ospf lsdb summary 1.1.6.1
+	 OSPF Process 1 with Router ID 5.5.5.5
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Sum-Net
+  Ls id     : 1.1.6.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 181 
+  Len       : 28 
+  Options   :  E  DN  
+  seq#      : 80000003 
+  chksum    : 0x1fa3
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 2
+  Priority  : Medium
+<AR5>display ospf routing 
+	 OSPF Process 1 with Router ID 5.5.5.5
+		  Routing Tables 
 
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 1.1.5.1/32         0     Stub       1.1.5.1         5.5.5.5         0.0.0.0
+ 172.16.1.0/24      1     Transit    172.16.1.2      5.5.5.5         0.0.0.0
+ 1.1.6.1/32         3     Inter-area 172.16.1.1      10.1.1.1        0.0.0.0
 
-二、MCE + OSPF VPN 多实例，未配置 vpn-instance-capability simple：LSA 可以进入 LSDB，但 DN=1 会阻止相应路由计算
+ Routing for ASEs
+ Destination        Cost      Type       Tag         NextHop         AdvRouter
+ 172.16.2.0/24      1         Type2      3489661028  172.16.1.1      10.1.1.1
 
-这一种就是最容易让人困惑的情况。
+ Total Nets: 4  
+ Intra Area: 2  Inter Area: 1  ASE: 1  NSSA: 0 
+```
 
-MCE 本质上是 CE，但为了同时承载多个 VPN，它不是简单使用一个公网 OSPF 进程，而是可能创建：
+根据华为的官方文档，DN-bit It is a flag bit used by OSPF multi-instance processes to prevent routing loops. **<font color="red">_After OSPF multi-instanceis configured on the router (a PE or an MCE)_</font>**, the router sets the DN-bit of generated Type 3, Type 5, or Type 7 LSAs to 1 and retains the DN-bit (0) of other LSAs. When calculating routes, the OSPF multi-instance process on the router ignores LSAs with DN-bit 1, which prevents the router from receiving the LSAs that are advertised by itself. **<font color="red">也就是针对华为的设备，执行 DN Bit 检查的是 OSPF 多实例进程，典型设备是 PE 或 MCE</font>**。
 
-ospf 100 vpn-instance VPN-A
+#### 7.4.2 MCE 未关闭 DN Bit 检查:LSA 入库但不生成路由
 
-这样的 OSPF VPN multi-instance。
+接下来我们对 CE1 的配置进行更改，使其从普通的 CE 变为 MCE。具体的 MCE 配置如下所示：
 
-从业务角色上看，这台设备仍然属于客户侧，它应该像 CE 一样学习 PE给它的远端 VPN 路由。但是从 Huawei VRP 的 OSPF 实现角度看，它运行的已经是一个和 VPN instance绑定的私网 OSPF 多实例，而 DN Bit 防环机制恰恰就是 OSPF VPN 多实例所具备的能力。
+```java{.line-numbers}
+#
+ sysname AR5
+#
+ip vpn-instance vpna
+ ipv4-family
+  route-distinguisher 100:5
+#
+interface GigabitEthernet0/0/0
+ ip binding vpn-instance vpna
+ ip address 172.16.1.2 255.255.255.0 
+#
+interface LoopBack0
+ ip binding vpn-instance vpna
+ ip address 1.1.5.1 255.255.255.255 
+#
+ospf 1 router-id 5.5.5.5 vpn-instance vpna
+ area 0.0.0.0 
+  network 1.1.5.1 0.0.0.0 
+  network 172.16.1.0 0.0.0.255 
+```
 
-这就产生了 MCE 最核心的矛盾。
+上述就是 MCE 的配置，首先是创建 VPN 实例 vpna，并且和 OSPF 进程 1 绑定。根据华为的官方文档，An OSPF process can be bound to only one VPN instance. If an OSPF process is not bound to any VPN instance before it is started, this process becomes a public network process and cannot be bound to a VPN instance later. **<font color="red">一个 OSPF 进程只能绑定一个 VPN 实例（也就是不能让同一个 OSPF 进程同时属于 vpna 和 vpnb）</font>**，而同一台路由器可以运行多个独立的 OSPF 进程。
 
-华为 NetEngine 8000 的 MCE 配置指南对此描述得非常明确：如果 MCE部署了 OSPF VPN multi-instance，PE 向 MCE 发送的 LSA 可以带有 DN=1；由于 MCE 上配置了 VPN instance，MCE存在路由环路检测，如果检测到 LSA 的 DN Bit 等于 1，这个 LSA 不能用于计算路由。华为随后明确要求使用 vpn-instance-capability simple 来解决这个问题。
+接下来，在 VPN 实例 vpna 中，配置了 **`route-distinguisher 100:5`**，这是因为只有配置了 **`route-distinguisher`** 之后，VPN 实例的 IPv4 地址族才能生效。根据华为的文档，A VPN instance IPv4 address family takes effect only after being assigned an RD. The RDs of different VPN instance IPv4 address families on a PE must be different.
 
-华为的故障处理文档恰好给出了这种排障逻辑。例如对于 Summary LSA，如果私网 OSPF 进程绑定了 VPN instance，同时没有配置 vpn-instance-capability simple，则应检查 Summary LSA 的 Options 字段是否出现 DN；如果存在 DN，华为明确指出该私网 OSPF进程不会计算这条 Summary LSA，因此没有对应区域间 OSPF 路由属于正常结果。
+但是在 VPN 实例 vpna 中，没有配置 vpn-target，这是因为 RT（Route Target）是 BGP 扩展团体属性（Extended Community）的一种，广泛用于 BGP/MPLS L3VPN 的 VPN 路由导入、导出控制。根据华为的文档，skip this step when the device functions as the MCE only. 也就是说如果设备仅作为 MCE 使用，**`vpn-target`** 这一步可以跳过。
 
-这正是 vpn-instance-capability simple 存在的原因。
+上述配置以后，其余 AR 路由器的配置不发生变化，并且 CE1 也不配置 **`vpn-instance-capability simple`**，此时 CE1 上的 OSPF 路由表如下所示，可以看到没有 **`1.1.6.1/32`** 路由，但是收到了 **`1.1.6.1/32`** 的 Type3 LSA。
+```java{.line-numbers}
+<AR5>display ospf routing 
 
-三、MCE + vpn-instance-capability simple：仍然接收 LSA，但取消 DN/Route-Tag 防环检查，因此 DN=1 也可以形成路由
+	 OSPF Process 1 with Router ID 5.5.5.5
+		  Routing Tables 
 
-配置：
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 1.1.5.1/32         0     Stub       1.1.5.1         5.5.5.5         0.0.0.0
+ 172.16.1.0/24      1     Transit    172.16.1.2      5.5.5.5         0.0.0.0
 
-ospf 100 vpn-instance VPN-A
+ Total Nets: 2  
+ Intra Area: 2  Inter Area: 0  ASE: 0  NSSA: 0 
+<AR5>display ospf lsdb summary 1.1.6.1
+
+	 OSPF Process 1 with Router ID 5.5.5.5
+		         Area: 0.0.0.0
+		 Link State Database 
+
+  Type      : Sum-Net
+  Ls id     : 1.1.6.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 393 
+  Len       : 28 
+  Options   :  E  DN  
+  seq#      : 8000000a 
+  chksum    : 0x11aa
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 2
+  Priority  : Medium
+```
+
+MCE 本质上仍属于客户侧设备，但为了同时承载并隔离多个 VPN，需要为不同 VPN 配置独立的 VPN 实例，并运行与之绑定的 OSPF 进程。**<font color="red">因此，MCE 既需要像普通 CE 一样学习 PE 发布的远端 VPN 路由，又具备 OSPF VPN 多实例的防环检测机制</font>**。
+
+#### 7.4.3 MCE 关闭 DN Bit 检查:LSA 入库并且生成路由
+
+在 CE1 上进行如下配置：
+
+```java{.line-numbers}
+ospf 1 router-id 5.5.5.5 vpn-instance vpna
  vpn-instance-capability simple
+```
 
-之后，MCE 的逻辑发生了本质变化。
+**`vpn-instance-capability simple`** 用于禁止路由环路检测，直接进行路由计算。在配置好该命令之后，CE1 上收到了 **`1.1.6.1/32`** 的 Type3 LSA（DN bit 置位）。但是在 OSPF 路由表中存在 **`1.1.6.1/32`** 的路由，也就是说，配置这个命令以后，OSPF 不再检查 DN Bit 和 Route Tag，而直接计算 OSPF 路由。
 
-华为对这个命令给出的定义非常直接：vpn-instance-capability simple 用于禁止路由环路检测，直接进行路由计算。
+```java{.line-numbers}
+[AR5-ospf-1]display ospf routing 
+	 OSPF Process 1 with Router ID 5.5.5.5
+		  Routing Tables 
 
-在 MCE 场景下，如果 Type 3、Type 5 或 Type 7 LSA设置了 DN Bit，本来 VPN OSPF 的防环检测可能导致这些 LSA 无法形成路由；配置这个命令以后，OSPF 不再检查 DN Bit 和 Route Tag，而直接计算 OSPF 路由。
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 1.1.5.1/32         0     Stub       1.1.5.1         5.5.5.5         0.0.0.0
+ 172.16.1.0/24      1     Transit    172.16.1.2      5.5.5.5         0.0.0.0
+ 1.1.6.1/32         3     Inter-area 172.16.1.1      10.1.1.1        0.0.0.0
+ Routing for ASEs
+ Destination        Cost      Type       Tag         NextHop         AdvRouter
+ 172.16.2.0/24      1         Type2      3489661028  172.16.1.1      10.1.1.1
 
-所以 MCE 配置 simple 后，并不是 DN Bit 从报文里神奇消失了。核心在于：
+ Total Nets: 4  
+ Intra Area: 2  Inter Area: 1  ASE: 1  NSSA: 0 
 
-MCE 不再利用收到 LSA 中的 DN Bit，作为阻止相应 OSPF 路由计算的防环条件。
+[AR5-ospf-1]display ospf lsdb summary 1.1.6.1
 
-所以这一行可以总结成：
+	 OSPF Process 1 with Router ID 5.5.5.5
+		         Area: 0.0.0.0
+		 Link State Database 
 
-配置 vpn-instance-capability simple 后，MCE仍然正常接收和保存 DN=1 的 LSA，但是取消了 OSPF VPN 多实例原有的 DN Bit 和 VPN Route Tag 环路检测。在满足其他 OSPF 路由计算条件的情况下，即使 LSA 携带 DN=1，也可以正常参与路由计算并形成 OSPF 路由。这使 MCE 在保持 VPN-instance 路由隔离能力的同时，获得符合 CE 角色的路由学习行为。
+  Type      : Sum-Net
+  Ls id     : 1.1.6.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 237 
+  Len       : 28 
+  Options   :  E  DN  
+  seq#      : 8000000c 
+  chksum    : 0xdac
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 2
+  Priority  : Medium
+```
 
-配置了OSPF多实例的路由器（一般是PE或者MCE）在生成Type3、Type5或Type7 LSA时，都会将DN位置位（值为1）。
+在 MPLS L3VPN 中，PE 将从 VPN 骨干学习的 BGP 路由重新发布到 OSPF 时，会为生成的 Type 3、Type 5 或 Type 7 LSA 设置 **`DN=1`**，以防止路由环路。需要注意，DN Bit 并不阻止 LSA 的接收、存储和正常泛洪，而是影响 OSPF VPN 多实例进程的路由计算。
 
-路由器的OSPF多实例进程在进行计算时，会进行DN位检查，忽略DN位置位的LSA。这样就防止了PE（或MCE）发出的LSA经过CE设备，再次回到PE（或MCE）而引起的路由环路。如图10-49所示，PE1在生成Type3、Type5或Type7 LSA发布给CE时，都将DN位置位（值为1）。CE再将该LSA发给PE2，PE2接收到该LSA后，会进行DN位检查，发现该LSA的DN位是1，因而忽略该LSA，避免了环路的产生.
+在 **`PE1—MCE—PE2`** 的组网中，MCE 可以接收 PE1 发布的 **`DN=1`** LSA，并将其保存到 LSDB。如果 MCE 未配置 **`vpn-instance-capability simple`**，其 OSPF VPN 多实例进程默认会进行 DN Bit 防环检查，不使用此类 LSA 计算路由，导致 LSDB 中存在 LSA，但路由表中没有对应路由。不过，只要满足 OSPF 的泛洪条件，该 LSA 仍可能继续传递到 PE2，由 PE2 执行 DN Bit 检查，避免路由重新引入 BGP 而形成环路。
 
-PE1 将来自 VPN Backbone 的路由以带 DN=1 的 OSPF LSA发布给 CE/MCE 后，该 LSA可以进入 CE/MCE 的 LSDB，并按照 OSPF 的泛洪规则继续传播。DN Bit 本身主要影响的是 OSPF VPN 多实例的路由计算，而不是阻止 LSA泛洪。
-
-如果 MCE 未配置 vpn-instance-capability simple 且当前产品实现启用了 DN 防环检查，那么 MCE自己不会利用 DN=1 的 Type 3/5/7 LSA计算相应 OSPF 路由；但这不意味着该 LSA不会继续泛洪到 PE2。
-
-配置 vpn-instance-capability simple 后，MCE不再检查 DN Bit 和 Route Tag，因此可以利用 PE1发来的 DN=1 LSA计算并安装路由。同时，该 LSA仍可按照 OSPF规则到达 PE2。
+在 MCE 对应的 OSPF 进程下配置 **`vpn-instance-capability simple`** 后，可以关闭 DN Bit 和 VPN Route Tag 相关的路由防环检查，使携带 **`DN=1`** 的 LSA 能够正常参与计算并生成路由。该命令使 MCE 在保留多 VPN 隔离能力的同时，具备普通 CE 所需的路由学习行为。
