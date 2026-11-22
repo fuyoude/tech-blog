@@ -80,65 +80,166 @@ PE1 收到该路由后，如果 OSPF Domain ID 匹配、原始路由类型正确
 
 所以，即使 PE1 已经把远端 Site2 的路由作为 Type3 LSA 发布到了 Area 1，CE1 仍然不会将它通告到自己连接的 Area 0 中。
 
-前文中提到过，如果本端站点内的路由通告到远端站点后变成了区域间路由，如果这时用户的站点之间还有后门链路，那么本端站点内部的路由通过后门链路传递过去的还是内部路由，而此时通过 MPLS VPN 骨干接收到的路由是区域间路由，根据 OSPF 的路由优先顺序，远端站点还是优选后门链路的路由。要避免这种情况，必须在 PE 之间配置一条特殊的链路 Sham-Link（伪链路），关于此内容后面再详细介绍。
+### 7.2 用于 OSPF 的 BGP 扩展团体属性
 
-## 一、MPLS L3VPN 为什么需要 OSPF 超级骨干区域？
+要想 OSPF 路由能无缝地穿越 MPLS VPN 骨干网络，就必须使 MP-BGP 协议携带 OSPF 路由的特征，比如路由类型、进程号等，**<font color="red">这些特征可以帮助远端 PE 决定向 CE 端通告什么类型的 LSA</font>**，这样就使得 OSPF 路由可以在远端 PE 处得以完全重建。
 
-## 二、OSPF 超级骨干区域的核心思想
+MPLS VPN 体系结构中使用 BGP 的扩展团体属性来传递 OSPF 路由的特征，这些特征包括：
 
-所谓超级骨干区域，并不是在运营商 MPLS 网络中真正创建一个新的 OSPF Area，也不是要求 P 路由器运行客户 OSPF，而是将 **MP-BGP 的 VPN 路由分发机制，逻辑上视为连接多个客户 OSPF 站点的骨干网络**。
+- 路由类型；
+- 区域号；
+- OSPF 路由器 ID；
+- 域 ID；
+- OSPF 外部路由的度量值类型 1 或 2。
 
-在这个模型中，PE 可以表现出类似 OSPF ABR 的行为。普通 ABR 通过 Area 0 在不同区域之间交换路由，而 MPLS L3VPN 中的 PE 则通过 MP-BGP 在不同站点之间交换 VPNv4 路由。当远端 PE 收到 VPNv4 路由后，如果确认该路由来自相同的 OSPF Domain，并且原始路由属于 OSPF 区域内或区域间路由，就可以将其以 Type 3 Summary LSA 的形式通告给本地 CE，使 CE 将其识别为区域间路由，而不是外部路由。
+在 MPLS L3VPN 的 OSPF VPN 扩展机制中，PE 将 VPNv4 路由重新发布到 OSPF 时，需要根据路由携带的 OSPF Domain ID 和 OSPF Route Type 扩展团体属性，共同判断该路由应当以哪种 LSA 类型进行通告。
 
-需要注意的是，超级骨干只是一种逻辑抽象，不代表不同 Site 的 OSPF 链路状态数据库（LSDB）会合并，也不意味着 Type 1、Type 2 LSA 会直接穿越运营商骨干。各个 Site 仍然维护自己的 OSPF LSDB，PE 之间交换的是 VPNv4 路由以及与原始 OSPF 路由有关的属性，再由远端 PE 根据这些属性重新生成适当类型的 LSA。
+**<font color="red">如果路由的 Domain ID 与本地 OSPF 进程的 Domain ID 匹配，并且 Route Type 为 1、2、3，则远端 PE 通常以 Type 3 LSA 的形式将该路由通告给 CE；如果 Domain ID 不匹配，或者原始路由属于 OSPF 外部路由，则将其按照外部路由处理，通常以 Type 5 LSA 的形式发布</font>**。
 
-因此，**超级骨干机制的核心作用，是在跨站点传播 VPN 路由时，尽可能保留原始 OSPF 路由的内部与外部属性，而不是透明传输 OSPF 链路状态信息。**
+OSPF 进程的域 ID 包含在此进程生成的路由中，在将 OSPF 路由引入到 BGP 中时，域 ID 被附加到 VPNv4 路由上，作为 BGP 的扩展团体属性传递。根据 RFC 2328，A 32-bit number identifying the area. The Area ID of **`0.0.0.0`** is reserved for the backbone. 根据 RFC 4577，each OSPF instance MUST be associated with one or more Domain Identifiers. Area numbers are relative to a particular OSPF domain. 也就是说 OSPF 区域编号是相对于某个特定的 OSPF 路由域而言的。
 
-## 三、结合 PE1、PE2、CE1、CE2 理解路由传播过程
+<div align="center">
+    <img src="mpls_static/59.png" width="550"/>
+</div>
 
-假设某个企业有两个站点 Site1 和 Site2，分别通过 CE1—PE1 和 CE2—PE2 接入 MPLS L3VPN。两个 Site 都运行 OSPF，并且属于同一个企业 OSPF Domain。现在假设 Site2 存在一条 `192.168.20.0/24` 路由，该路由原本属于 OSPF 区域内部路由，希望通过 MPLS VPN 将其通告给 Site1，同时保留其内部路由性质。
+在之前 PE-CE 之间运行 OSPF 协议的网络拓扑图，PE2 上 VPNv4 路由（**`1.1.5.1/32`**）的路由更新，以及为该路由所关联的 BGP 扩展属性如下所示。
 
-首先，CE2 通过 OSPF 将 `192.168.20.0/24` 通告给 PE2。由于 PE2 面向 CE2 的接口绑定了 VPN 实例 `vpna`，并且运行了与该实例关联的 OSPF 进程，因此 PE2 可以通过 OSPF 邻接、LSA 交换和路由计算学习这条路由，并将有效路由安装到 `vpna` 的路由表中。在这个阶段，它仍然是一条客户 OSPF 路由。
+```java{.line-numbers}
+<AR4>display bgp vpnv4 all routing-table 1.1.5.1 32
 
-随后，PE2 通过 BGP VPN 实例地址族下的 `import-route ospf 2`，将符合条件的 OSPF 路由引入 BGP，并通过 MP-BGP 向 PE1 发布 VPNv4 路由。在转换过程中，PE2 不仅关联 RD、RT、VPN Label 和 BGP Next-Hop 等 MPLS L3VPN 信息，还会根据 RFC 4577 携带与原始 OSPF 路由有关的属性，包括 OSPF Domain ID、OSPF Route Type 以及可选的 OSPF Router ID。原始路由的度量信息通常通过 BGP MED 属性传递。
+ BGP local router ID : 10.4.4.4
+ Local AS number : 100
 
-这些 OSPF 属性使 PE1 不仅能够知道目的前缀是 `192.168.20.0/24`，还能够判断这条路由来自哪个 OSPF Domain，以及它原来属于区域内、区域间还是外部路由。这就为后续恢复正确的 OSPF 路由类型提供了依据。
+ Total routes of Route Distinguisher(100:1): 1
+ BGP routing table entry information of 1.1.5.1/32:
+ Label information (Received/Applied): 1028/NULL
+ From: 10.1.1.1 (10.1.1.1)
+ Route Duration: 00h00m19s  
+ Relay IP Nexthop: 10.1.34.3
+ Relay IP Out-Interface: GigabitEthernet0/0/0
+ Relay Tunnel Out-Interface: GigabitEthernet0/0/0
+ Relay token: 0x1
+ Original nexthop: 10.1.1.1
+ Qos information : 0x0
+ Ext-Community:RT <1 : 1>, OSPF DOMAIN ID <0.0.0.0 : 0>, 
+               OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.1.1.1 : 0>
+ AS-path Nil, origin incomplete, MED 2, localpref 100, pref-val 0, valid, internal, best, select, pre 255, IGP cost 3
+ Not advertised to any peer yet
+```
 
-接下来，PE1 收到 VPNv4 路由后，首先根据 RT 和本地 VPN 路由策略判断它是否可以导入 `vpna`，并经过 BGP 选路、下一跳可达性检查等处理，确定该路由能否成为有效的 VPN 路由。需要特别区分的是：**RT 决定 VPN 路由可以导入哪个 VRF，而 OSPF Domain ID 和 Route Type 决定该路由重新发布到 OSPF 时应按什么类型处理。**
+关于上面的输出内容，BGP 扩展团体属性的解释如下。
 
-最后，PE1 通过 VPN 实例 OSPF 进程下的 `import-route bgp`，将远端 BGP VPN 路由重新发布给 CE1。在这个过程中，PE1 检查路由携带的 OSPF Domain ID 是否与本地 OSPF 实例匹配，并判断原始路由类型。如果 `192.168.20.0/24` 原本属于 OSPF 区域内部路由，两个 PE 对应的 OSPF Domain ID 匹配，并且满足相应的路由发布条件，那么 PE1 就可以生成 Type 3 Summary LSA，使 CE1 将该路由识别为区域间路由，而不是通过 Type 5 LSA 将其视为外部路由。
+- **`RT<1:1>`**：这个值表示 VPN 路由的 RT 值，注意这里不是表示路由类型（route-type），而是 vpn-target，也就是 **`export RT`** 值为 **`1:1`**。
+- **`OSPF DOMAIN ID<0.0.0.0:0>`**：冒号前面部分 **`0.0.0.0`** 表示域 ID 值，后面部分表示可选项，默认为 0。
+- **`OSPF RT<0.0.0.0:1:0>`**：这个值表示 OSPF 路由类型，共分成 3 部分，第 1 部分表示区域号，第 2 部分表示路由类型，第 3 部分表示外部路由的度量值类型 1 或 2。后两个部分（路由及度量值类型）取值及其解释如下。
+  - **`:1:0`** or **`:2:0`** 表示内部路由（LSA1 或 LSA2）。
+  - **`:3:0`** 表示区域间路由（LSA3）。
+  - **`:5:0`** or **`5:1`** 表示外部路由（LSA5），度量值类型分别是 1 或 2。
+  - **`:7:0`** or **`7:1`** 表示外部路由（LSA7），度量值类型分别是 1 或 2。
+  - **`:129:0`** 表示 sham-link 端点。
+- **`OSPF Router-ID<10.1.1.1:0>`** 表示发送该路由的 VPN 实例的 Router-ID。
 
-## 四、OSPF Domain ID 如何影响 Type 3 和 Type 5 LSA？
+### 7.3 OSPF 路由穿越 MPLS VPN 骨干网的 metric 传递
 
-OSPF Domain ID 是判断不同站点的 OSPF 路由是否属于同一个 OSPF 域的重要标识。它不同于 OSPF Area ID，也不同于 OSPF 进程号。Area ID 用于区分同一个 OSPF 域中的不同区域，而 Domain ID 用于标识不同的 OSPF 路由域。例如，一个企业可以同时运行 Area 0、Area 1 和 Area 2，但它们仍然属于同一个 OSPF Domain。
+在 PE 上将 OSPF 内部路由或外部路由引入到 BGP 后，使用 OSPF 路由的 Cost 值来设置 BGP 路由的 MED 值。当远端的 PE 把 BGP 路由引入到 OSPF 区域时，又将 MED 值复制回来给 OSPF 路由的 Cost 值，具体过程分为以下几种情况。
 
-当 PE2 将 OSPF 路由转换为 VPNv4 路由时，会携带对应的 OSPF Domain ID。PE1 接收到路由后，将其与本地 OSPF 实例的 Domain ID 进行比较。如果按照 RFC 4577 的规则能够匹配，并且原始路由属于区域内或区域间路由，那么 PE1 通常将其作为 Type 3 LSA 发布，使本地 CE 学到区域间路由。
+（1）两端 PE 的域 ID 设置相同的情况，OSPF 内部和外部路由的 Cost 传递的情况如下图所示。
 
-如果两端 OSPF Domain ID 不匹配，那么即使这条路由在 Site2 中原本是区域内部路由，PE1 也会将其按照外部路由处理，在普通区域中通常生成 Type 5 LSA。另一种情况是，即使 Domain ID 匹配，但这条路由原本就是 OSPF 外部路由，PE1 仍应保留其外部路由性质，而不是将其转换为 Type 3。对于 NSSA 外部路由，还需要按照相应的 Type 7 LSA 规则处理。实际是否发布，也受到区域类型和路由策略等条件限制。
+<div align="center">
+    <img src="mpls_static/60.png" width="600"/>
+</div>
 
-需要注意，RFC 4577 对 NULL Domain ID 还有特殊的匹配规则，因此并不是只有显式配置相同数字的 Domain ID 才能够匹配。
+如上图所示，PE1 收到 CE1 的路由后，**因为要累加入口链路的开销，所以引入到 BGP 后的 MED 值为 2**。远端的 PE2 将 BGP 路由引入到 OSPF 区域时，直接用 MED 值代替 OSPF 路由的开销值。这种情况下，由于 PE1 和 PE2 的域 ID 相同，所以在 PE2 上会根据路由的类型来产生相应的 LSA 给 CE2。
 
-**因此，Type 3 与 Type 5/7 的选择主要取决于两个因素：路由是否来自相同的 OSPF Domain，以及该路由原本属于内部路由还是外部路由。**
+（2）两端 PE 的域 ID 设置不相同的情况，OSPF 内部和外部路由的 Cost 传递的情况如下图所示。
 
-## 五、结合教材图 8-52 理解 PE 的 ABR 角色
+<div align="center">
+    <img src="mpls_static/61.png" width="600"/>
+</div>
 
-在教材图 8-52 中，CE1 一侧存在 Area 1，而 CE1 与 PE1 之间运行 OSPF Area 0。如果 CE1 同时连接 Area 0 和 Area 1，那么 CE1 就是一个真正的 OSPF ABR。PE1 则通过面向 CE1 的 OSPF 接口参与客户网络，同时通过 MP-BGP 与远端 PE 交换 VPNv4 路由。在超级骨干模型中，PE1 可以表现出类似 ABR 的路由通告行为，将远端站点符合条件的内部路由作为 Type 3 LSA 发布给本地客户网络。
+如上图所示，因为 PE1 和 PE2 的域 ID 不同，所以在 PE2 上把 BGP 路由引入到 OSPF 区域的路由都是 OSPF 外部路由，而 Cost 值仍然是复制 BGP 路由的 MED 值。
 
-仍然以 Site2 的 `192.168.20.0/24` 为例，当这条路由经过 PE2 的 OSPF → MP-BGP 转换，再通过 MPLS VPN 骨干传递到 PE1 后，PE1 根据其携带的 OSPF 属性，在本地 Area 0 中重新生成 Type 3 LSA。CE1 收到后，将其作为区域间路由进行计算。如果 CE1 同时连接 Area 1，那么它还可以按照 OSPF 的区域间路由通告规则，向 Area 1 重新生成相应的 Type 3 LSA，使 Area 1 中的其他路由器也能够学习远端 Site2 的网络。
+>华为设备的 **`DOMAIN-ID`** 值默认为 0，它和 VPN 实例中的 OSPF 进程 ID 大小没有关系。
 
-这里需要注意，Type 3 LSA 并不是直接从 PE2 穿越 MPLS 骨干传递到 CE1 的，而是 **PE2 将 OSPF 路由转换成 VPNv4 路由，PE1 再将 VPNv4 路由转换为本地 OSPF LSA，随后 CE1 作为 ABR 向其他区域重新通告**。整个过程是不同设备分别生成路由通告，而不是同一份 LSA 在不同 Site 之间直接泛洪。
+### 7.4 防止 OSPF 站点间的路由环路
 
-此外，如果两个 Site 原本属于同一个 OSPF Area，但通过 MPLS VPN 互联，那么默认情况下，跨 VPN 学到的内部路由通常仍然表现为区域间路由。如果希望 MPLS VPN 路径在 OSPF 中表现为区域内路径，则需要进一步考虑 Sham Link 机制。
+在对网络健壮性要求较高的应用中，可以采用 CE 双归属方式组网，如下图所示。
 
-## 六、总结
+<div align="center">
+    <img src="mpls_static/62.png" width="450"/>
+</div>
 
-MPLS L3VPN 中的 OSPF 超级骨干区域，本质上是通过 MP-BGP 在不同客户站点之间传递 VPNv4 路由，并利用 OSPF Domain ID、Route Type 等属性保留原始路由性质的特殊交互机制。它使不同 Site 即使在物理上被 MPLS VPN 骨干隔开，也能够在逻辑上按照同一 OSPF 域的规则交换内部路由，而不必全部转换成外部路由。
+但是在 CE 双归属场景中，用户的 VPN 路由有可能通过多个 PE 传播到公网，导致潜在路由环路的产生，下面是产生环路的案例。
 
-对于来自相同 OSPF Domain 的区域内或区域间路由，远端 PE 在满足相关条件时，可以将其作为 Type 3 LSA 通告给 CE；对于不同 OSPF Domain 的路由，或者原本就是 OSPF 外部路由的情况，则按照外部路由机制处理，通常使用 Type 5 或 Type 7 LSA。
+<div align="center">
+    <img src="mpls_static/63.png" width="550"/>
+</div>
 
-**核心结论：MPLS L3VPN 的 OSPF 超级骨干区域，就是通过 MP-BGP 连接不同 Site 的 OSPF 路由域，并由远端 PE 根据路由来源和原始类型重新生成适当的 OSPF LSA，从而在实现跨站点互通的同时，尽可能保留 OSPF 原有的路由属性和选路逻辑。**
+如上图所示，PE1、PE2、PE3 都已建立 iBGP 连接，PE 和 CE 之间使用 OSPF 路由协议。这时假设由于链路质量问题，PE1 先接收到来自 PE3 的 VPNv4 路由（**`2.2.2.2/32`**），PE1 会将 BGP 路由引入到左侧站点的 OSPF 区域，PE2 从 OSPF 学习到该路由，下一跳指向 CE1。然后又在 PE 上做了双向引入，所以 PE2 会将该 OSPF 路由引入到 BGP 形成 VPNv4 路由，同时将该路由通告给 PE1。这时，PE1 从 PE2 和 PE3 接收到了同一条 VPN 路由，在链路开销相等的情况下，假设 PE2 的 **`Router-ID`** 小于 PE3 的 **`Router-ID`**，那么 PE1 会优选 PE2 为下一跳，环路就产生了。
 
-## 参考资料
+为避免潜在的路由环路问题，需要使用到 OSPF 报文头部选项中的 DN 比特位。DN 比特位于 **`LSA3/LSA5/LSA7`** 中的 Option 字段，用于表明路由是由 PE 向 CE 方向传递的，**<font color="red">也就是说一条路由如果由 PE 发布给 CE，这条路由的 DN 比特位就会被置位为 1</font>**。同一用户站点的其他 PE 在收到带有置了 DN 比特位的 LSA3 时，不会进行 SPF 路由计算，更不会将其引入到 BGP 中。如下图所示，显示了一台 PE 路由器在接收到置了 DN 比特位的 LSA 时，不会再将其通告进 BGP 中。
 
-* [RFC 4577 — OSPF as the PE/CE Protocol for BGP/MPLS VPNs](https://www.rfc-editor.org/rfc/rfc4577.html)，重点参考 §4.1、§4.2.4、§4.2.6 和 §4.2.8。
-* [华为官方 — OSPF 工作原理](https://info.support.huawei.com/info-finder/encyclopedia/zh/OSPF.html)，关于 OSPF 区域、ABR、LSA 及路由计算的说明。
+<div align="center">
+    <img src="mpls_static/64.png" width="400"/>
+</div>
+
+#### 7.4.1 普通 CE 会接收 DN 置位的 LSA 并计算路由
+
+
+
+在 MPLS L3VPN 的 PE-CE OSPF 场景中，远端站点的一条客户路由可能先由远端 CE 通过 OSPF 交给 PE，再由 PE 转换成 MP-BGP VPN 路由穿越 VPN Backbone；当这条 VPN 路由到达本地 PE 后，本地 PE又需要把它重新转换成 OSPF 路由发送给本地 CE。根据华为的 OSPF VPN 原理说明，当 PE 把这种 VPN 路由重新发布成 Type 3、Type 5 或 Type 7 LSA 时，会在相应 LSA 中设置 DN Bit。也就是说，普通 CE 正常收到 PE 下发的远端 VPN 路由时，本来就可能收到 DN=1 的 LSA。
+
+华为在 OSPF VPN 原理文档里对 DN Bit 的描述非常有针对性：执行 DN Bit 检查的是 OSPF 多实例进程，典型设备是 PE 或 MCE。文档给出的防环模型也是 PE1 将 DN=1 的 LSA 发给 CE，LSA经过 CE 网络传播后重新到达 PE2，然后由 PE2 的 OSPF 多实例进程检查 DN 位并阻止其形成路由。
+
+
+
+二、MCE + OSPF VPN 多实例，未配置 vpn-instance-capability simple：LSA 可以进入 LSDB，但 DN=1 会阻止相应路由计算
+
+这一种就是最容易让人困惑的情况。
+
+MCE 本质上是 CE，但为了同时承载多个 VPN，它不是简单使用一个公网 OSPF 进程，而是可能创建：
+
+ospf 100 vpn-instance VPN-A
+
+这样的 OSPF VPN multi-instance。
+
+从业务角色上看，这台设备仍然属于客户侧，它应该像 CE 一样学习 PE给它的远端 VPN 路由。但是从 Huawei VRP 的 OSPF 实现角度看，它运行的已经是一个和 VPN instance绑定的私网 OSPF 多实例，而 DN Bit 防环机制恰恰就是 OSPF VPN 多实例所具备的能力。
+
+这就产生了 MCE 最核心的矛盾。
+
+华为 NetEngine 8000 的 MCE 配置指南对此描述得非常明确：如果 MCE部署了 OSPF VPN multi-instance，PE 向 MCE 发送的 LSA 可以带有 DN=1；由于 MCE 上配置了 VPN instance，MCE存在路由环路检测，如果检测到 LSA 的 DN Bit 等于 1，这个 LSA 不能用于计算路由。华为随后明确要求使用 vpn-instance-capability simple 来解决这个问题。
+
+华为的故障处理文档恰好给出了这种排障逻辑。例如对于 Summary LSA，如果私网 OSPF 进程绑定了 VPN instance，同时没有配置 vpn-instance-capability simple，则应检查 Summary LSA 的 Options 字段是否出现 DN；如果存在 DN，华为明确指出该私网 OSPF进程不会计算这条 Summary LSA，因此没有对应区域间 OSPF 路由属于正常结果。
+
+这正是 vpn-instance-capability simple 存在的原因。
+
+三、MCE + vpn-instance-capability simple：仍然接收 LSA，但取消 DN/Route-Tag 防环检查，因此 DN=1 也可以形成路由
+
+配置：
+
+ospf 100 vpn-instance VPN-A
+ vpn-instance-capability simple
+
+之后，MCE 的逻辑发生了本质变化。
+
+华为对这个命令给出的定义非常直接：vpn-instance-capability simple 用于禁止路由环路检测，直接进行路由计算。
+
+在 MCE 场景下，如果 Type 3、Type 5 或 Type 7 LSA设置了 DN Bit，本来 VPN OSPF 的防环检测可能导致这些 LSA 无法形成路由；配置这个命令以后，OSPF 不再检查 DN Bit 和 Route Tag，而直接计算 OSPF 路由。
+
+所以 MCE 配置 simple 后，并不是 DN Bit 从报文里神奇消失了。核心在于：
+
+MCE 不再利用收到 LSA 中的 DN Bit，作为阻止相应 OSPF 路由计算的防环条件。
+
+所以这一行可以总结成：
+
+配置 vpn-instance-capability simple 后，MCE仍然正常接收和保存 DN=1 的 LSA，但是取消了 OSPF VPN 多实例原有的 DN Bit 和 VPN Route Tag 环路检测。在满足其他 OSPF 路由计算条件的情况下，即使 LSA 携带 DN=1，也可以正常参与路由计算并形成 OSPF 路由。这使 MCE 在保持 VPN-instance 路由隔离能力的同时，获得符合 CE 角色的路由学习行为。
+
+配置了OSPF多实例的路由器（一般是PE或者MCE）在生成Type3、Type5或Type7 LSA时，都会将DN位置位（值为1）。
+
+路由器的OSPF多实例进程在进行计算时，会进行DN位检查，忽略DN位置位的LSA。这样就防止了PE（或MCE）发出的LSA经过CE设备，再次回到PE（或MCE）而引起的路由环路。如图10-49所示，PE1在生成Type3、Type5或Type7 LSA发布给CE时，都将DN位置位（值为1）。CE再将该LSA发给PE2，PE2接收到该LSA后，会进行DN位检查，发现该LSA的DN位是1，因而忽略该LSA，避免了环路的产生.
+
+PE1 将来自 VPN Backbone 的路由以带 DN=1 的 OSPF LSA发布给 CE/MCE 后，该 LSA可以进入 CE/MCE 的 LSDB，并按照 OSPF 的泛洪规则继续传播。DN Bit 本身主要影响的是 OSPF VPN 多实例的路由计算，而不是阻止 LSA泛洪。
+
+如果 MCE 未配置 vpn-instance-capability simple 且当前产品实现启用了 DN 防环检查，那么 MCE自己不会利用 DN=1 的 Type 3/5/7 LSA计算相应 OSPF 路由；但这不意味着该 LSA不会继续泛洪到 PE2。
+
+配置 vpn-instance-capability simple 后，MCE不再检查 DN Bit 和 Route Tag，因此可以利用 PE1发来的 DN=1 LSA计算并安装路由。同时，该 LSA仍可按照 OSPF规则到达 PE2。
