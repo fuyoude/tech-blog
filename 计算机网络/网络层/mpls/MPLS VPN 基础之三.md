@@ -183,7 +183,7 @@ OSPF 进程的域 ID 包含在此进程生成的路由中，在将 OSPF 路由�
     <img src="mpls_static/64.png" width="400"/>
 </div>
 
-#### 7.4.1 普通 CE 会接收 DN 置位的 LSA 并计算路由
+### 7.5 普通 CE 会接收 DN 置位的 LSA 并计算路由
 
 <div align="center">
     <img src="mpls_static/45.png" width="750"/>
@@ -247,7 +247,7 @@ OSPF 进程的域 ID 包含在此进程生成的路由中，在将 OSPF 路由�
 
 根据华为的官方文档，DN-bit It is a flag bit used by OSPF multi-instance processes to prevent routing loops. **<font color="red">_After OSPF multi-instanceis configured on the router (a PE or an MCE)_</font>**, the router sets the DN-bit of generated Type 3, Type 5, or Type 7 LSAs to 1 and retains the DN-bit (0) of other LSAs. When calculating routes, the OSPF multi-instance process on the router ignores LSAs with DN-bit 1, which prevents the router from receiving the LSAs that are advertised by itself. **<font color="red">也就是针对华为的设备，执行 DN Bit 检查的是 OSPF 多实例进程，典型设备是 PE 或 MCE</font>**。
 
-#### 7.4.2 MCE 未关闭 DN Bit 检查:LSA 入库但不生成路由
+### 7.6 MCE 未关闭 DN Bit 检查:LSA 入库但不生成路由
 
 接下来我们对 CE1 的配置进行更改，使其从普通的 CE 变为 MCE。具体的 MCE 配置如下所示：
 
@@ -314,7 +314,7 @@ ospf 1 router-id 5.5.5.5 vpn-instance vpna
 
 MCE 本质上仍属于客户侧设备，但为了同时承载并隔离多个 VPN，需要为不同 VPN 配置独立的 VPN 实例，并运行与之绑定的 OSPF 进程。**<font color="red">因此，MCE 既需要像普通 CE 一样学习 PE 发布的远端 VPN 路由，又具备 OSPF VPN 多实例的防环检测机制</font>**。
 
-#### 7.4.3 MCE 关闭 DN Bit 检查:LSA 入库并且生成路由
+### 7.7 MCE 关闭 DN Bit 检查:LSA 入库并且生成路由
 
 在 CE1 上进行如下配置：
 
@@ -329,7 +329,6 @@ ospf 1 router-id 5.5.5.5 vpn-instance vpna
 [AR5-ospf-1]display ospf routing 
 	 OSPF Process 1 with Router ID 5.5.5.5
 		  Routing Tables 
-
  Routing for Network 
  Destination        Cost  Type       NextHop         AdvRouter       Area
  1.1.5.1/32         0     Stub       1.1.5.1         5.5.5.5         0.0.0.0
@@ -341,7 +340,6 @@ ospf 1 router-id 5.5.5.5 vpn-instance vpna
 
  Total Nets: 4  
  Intra Area: 2  Inter Area: 1  ASE: 1  NSSA: 0 
-
 [AR5-ospf-1]display ospf lsdb summary 1.1.6.1
 
 	 OSPF Process 1 with Router ID 5.5.5.5
@@ -363,6 +361,9 @@ ospf 1 router-id 5.5.5.5 vpn-instance vpna
 
 在 MPLS L3VPN 中，PE 将从 VPN 骨干学习的 BGP 路由重新发布到 OSPF 时，会为生成的 Type 3、Type 5 或 Type 7 LSA 设置 **`DN=1`**，以防止路由环路。需要注意，DN Bit 并不阻止 LSA 的接收、存储和正常泛洪，而是影响 OSPF VPN 多实例进程的路由计算。
 
-在 **`PE1—MCE—PE2`** 的组网中，MCE 可以接收 PE1 发布的 **`DN=1`** LSA，并将其保存到 LSDB。如果 MCE 未配置 **`vpn-instance-capability simple`**，其 OSPF VPN 多实例进程默认会进行 DN Bit 防环检查，不使用此类 LSA 计算路由，导致 LSDB 中存在 LSA，但路由表中没有对应路由。不过，只要满足 OSPF 的泛洪条件，该 LSA 仍可能继续传递到 PE2，由 PE2 执行 DN Bit 检查，避免路由重新引入 BGP 而形成环路。
+在 **`PE1—MCE—PE2`** 的组网中，MCE 可以接收 PE1 发布的 **`DN=1`** LSA，并将其保存到 LSDB。如果 MCE 未配置 **`vpn-instance-capability simple`**，其 OSPF VPN 多实例进程默认会进行 DN Bit 防环检查，不使用此类 LSA 计算路由，导致 LSDB 中存在 LSA，但路由表中没有对应路由。
 
 在 MCE 对应的 OSPF 进程下配置 **`vpn-instance-capability simple`** 后，可以关闭 DN Bit 和 VPN Route Tag 相关的路由防环检查，使携带 **`DN=1`** 的 LSA 能够正常参与计算并生成路由。该命令使 MCE 在保留多 VPN 隔离能力的同时，具备普通 CE 所需的路由学习行为。
+
+### 7.8 跨区域重新生成 LSA3 导致 DN Bit 丢失
+
