@@ -367,3 +367,330 @@ ospf 1 router-id 5.5.5.5 vpn-instance vpna
 
 ### 7.8 跨区域重新生成 LSA3 导致 DN Bit 丢失
 
+DN 位也无法避免上述的环路问题，如下图所示的场景，CE 双归属，CE1 连接 PE1 的链路在 Area0 中，CE1 连接 PE2 的链路放在 Area1 中。当 PE1 以 LSA3 的形式向 CE1 发送 OSPF 路由时，这时 DN 比特置位。由于 CE1 是 ABR，当这条 LSA3 经过 CE1 再传递到 Area1 时，DN 比特位置为 0，当 PE2 接收后，可能仍然会计算该路由，从而造成环路隐患。
+
+<div align="center">
+    <img src="mpls_static/65.png" width="600"/>
+</div>
+
+#### 7.8.1 实验配置
+
+上述网络拓扑图中，AR1 的配置如下所示，
+
+```java{.line-numbers}
+#
+ sysname AR1
+#
+ip vpn-instance vpna
+ ipv4-family
+  route-distinguisher 100:1
+  vpn-target 1:1 export-extcommunity
+  vpn-target 1:1 import-extcommunity
+#
+mpls lsr-id 10.1.1.1
+mpls
+#
+mpls ldp
+#
+interface GigabitEthernet0/0/0
+ ip binding vpn-instance vpna
+ ip address 10.1.14.1 255.255.255.0 
+#
+interface GigabitEthernet0/0/1
+ ip address 10.1.12.1 255.255.255.0 
+ mpls
+ mpls ldp
+#
+interface LoopBack0
+ ip address 10.1.1.1 255.255.255.255 
+#
+bgp 100
+ router-id 10.1.1.1
+ undo default ipv4-unicast
+ peer 10.3.3.3 as-number 100 
+ peer 10.3.3.3 connect-interface LoopBack0
+ #
+ ipv4-family unicast
+  undo synchronization
+  undo peer 10.3.3.3 enable
+ # 
+ ipv4-family vpnv4
+  policy vpn-target
+  peer 10.3.3.3 enable
+ #
+ ipv4-family vpn-instance vpna 
+  import-route ospf 2
+#
+ospf 1 router-id 1.1.1.1 
+ area 0.0.0.0 
+  network 10.1.1.1 0.0.0.0 
+  network 10.1.12.0 0.0.0.255 
+#
+ospf 2 router-id 10.1.1.1 vpn-instance vpna
+ import-route bgp
+ area 0.0.0.0 
+  network 10.1.14.0 0.0.0.255 
+```
+**（1）配置 `ospf 2 router-id 10.1.1.1 vpn-instance vpna`**
+
+首先解释一下配置 **`ospf 2 router-id 10.1.1.1 vpn-instance vpna network 10.1.14.0 0.0.0.255`**。network 只能匹配已经属于 vpna 的接口，**`network 10.1.14.0 0.0.0.255`** 的前提是 AR1 的 **`GE0/0/0`** 接口必须先配置 **`ip binding vpn-instance vpna`**。绑定之后，ospf 2 只会去扫描属于 vpna 的接口，找到 **`10.1.14.1`** 并激活 OSPF，从而与 AR4（CE1）建立邻居。如果 **`GE0/0/0`** 没绑定 vpna（留在公网里），就算 ospf 2 写了这条 network，也不会生效。
+
+另外，AR1 通过 ospf 2 从 AR4 学到的所有私网路由（例如 AR4 的环回口 **`10.4.4.4/32`**），只会写入 vpna 的路由表，绝对不会出现在 AR1 的公网全局路由表里。这样即使有另一个客户 vpnb 也用了 **`10.4.4.4/32`**，两者也不会冲突。
+
+**（2）import-route bgp**
+
+首先 AR3 学到 AR5 的私网路由后，会给它加上 RD、私网 MPLS 标签，以及 AR3 上 vpna 配置的 Export RT，封装成一条 VPNv4 路由，通过 MP-BGP 传给 AR1。AR1 收到这条 VPNv4 路由后，会提取它携带的 Export RT，与本地 vpna 实例中配置的 Import RT 进行比对。如果不匹配就直接丢弃，不进入 vpna。如果匹配，AR1 就剥离掉 RD，将其还原为普通的 IPv4 路由。
+
+还原后的路由会先进入 BGP 的 **`ipv4-family vpn-instance vpna`** 路由表。如果它经过 BGP 选路后成为最优路由，就会被下发到 vpna 的 IP 路由表中，协议类型显示为 IBGP。由于 ospf 2 绑定了 vpna，**<font color="red">它里面的 **`import-route bgp`** 命令只会去扫描 vpna 路由表中处于活跃（Active）状态的 BGP 路由，把它们转换成 OSPF 2 的 LSA</font>**，再通过运行 OSPF 2 协议接口 **`G0/0/0`** 发给 AR4。
+
+**（3）import-route ospf**
+
+因为 ospf 2 在创建时就已经绑定了 vpna 实例，所以 AR1 通过 ospf 2 从 AR4 学到路由（比如 **`10.4.4.4/32`**）后，直接就把它放进了 vpna 的 IP 路由表中，协议类型为 OSPF。当在 bgp 100 的 **`ipv4-family vpn-instance vpna`** 视图下敲入 **`import-route ospf 2`** 时，BGP 进程就会去扫描 vpna 的 IP 路由表，执行筛选。**<font color="red">首先只看 vpna 实例路由表（不会去查询 public 路由表），接下来只在 vpna 路由表中挑选协议类型为 OSPF 2，且状态为 Active（活跃） 的路由</font>**。最后将将这些挑选出来的路由安装进 BGP 的 vpna 路由表中（可以通过 **`display bgp vpnv4 vpn-instance vpna routing-table`** 进行查看）。
+
+一旦路由进入了 BGP 的 vpna 表，BGP 就会自动加上私网标签、RD 以及 export RT 等，变成一条 VPNv4 路由发送给远端 MP-BGP 邻居。 
+
+因此，总结为 import-route bgp 的作用就是把 vpna 路由表里活跃的 BGP 路由引入到 ospf 2 的 LSDB 中，再发给 AR4。import-route ospf 2 的作用就是把 vpna 路由表里活跃的 OSPF 2 路由引入到 BGP 的 vpna 路由表中，方便后续添加 RD、私网标签和 Export RT，发给对端 AR3。vpna IP 路由表作为 BGP VPN 和 OSPF 2 共同的路由空间和转换媒介，不过 OSPF 和 BGP 各自还有协议内部的路由数据库。
+
+**（4）undo default ipv4-unicast**
+
+因为 AR1 和 AR3（**`10.3.3.3`**）之间只需要传递 vpnv4 私网路由，不需要传递公网 IPv4 路由，所以用 **`undo default ipv4-unicast`** 关掉了默认的公网邻居建立，只和 AR3 建立 vpnv4 的连接，这样更干净安全。
+
+AR3 的配置如下所示：
+
+```java{.line-numbers}
+#
+ sysname AR3
+#
+ip vpn-instance vpna
+ ipv4-family
+  route-distinguisher 100:3
+  vpn-target 1:1 export-extcommunity
+  vpn-target 1:1 import-extcommunity
+#
+mpls lsr-id 10.3.3.3
+mpls
+#
+mpls ldp
+#
+interface GigabitEthernet0/0/0
+ ip binding vpn-instance vpna
+ ip address 10.1.34.3 255.255.255.0 
+#
+interface GigabitEthernet0/0/1
+ ip address 10.1.23.3 255.255.255.0 
+ mpls
+ mpls ldp
+#
+interface GigabitEthernet0/0/2
+ ip binding vpn-instance vpna
+ ip address 10.1.35.3 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.3.3.3 255.255.255.255 
+#
+bgp 100
+ router-id 10.3.3.3
+ undo default ipv4-unicast
+ peer 10.1.1.1 as-number 100 
+ peer 10.1.1.1 connect-interface LoopBack0
+ #
+ ipv4-family unicast
+  undo synchronization
+  undo peer 10.1.1.1 enable
+ # 
+ ipv4-family vpnv4
+  policy vpn-target
+  peer 10.1.1.1 enable
+ #
+ ipv4-family vpn-instance vpna 
+  import-route ospf 2
+#
+ospf 1 router-id 3.3.3.3 
+ area 0.0.0.0 
+  network 10.1.23.0 0.0.0.255 
+  network 10.3.3.3 0.0.0.0 
+#
+ospf 2 router-id 10.3.3.3 vpn-instance vpna
+ import-route bgp
+ area 0.0.0.0 
+  network 10.1.35.0 0.0.0.255 
+ area 0.0.0.1 
+  network 10.1.34.0 0.0.0.255 
+```
+
+#### 7.8.2 实验结果
+
+我们先在 AR3 上执行如下命令，确保 CE2 的路由 **`1.1.5.1/32`** 已经到达 AR3。接下来，AR3 将 vpna 中的 **`1.1.5.1/32`** 路由添加上 RD（**`100:3`**）、export RT（**`1:1`**）以及私有标签 1028 通过 MP-BGP 传递给 PE1。
+
+```java{.line-numbers}
+<AR3>display ospf 2 routing 
+	 OSPF Process 2 with Router ID 10.3.3.3
+		  Routing Tables 
+
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 10.1.34.0/24       1     Transit    10.1.34.3       10.3.3.3        0.0.0.1
+ 10.1.35.0/24       1     Transit    10.1.35.3       10.3.3.3        0.0.0.0
+ 1.1.5.1/32         1     Stub       10.1.35.5       5.5.5.5         0.0.0.0
+ 10.5.5.5/32        1     Stub       10.1.35.5       5.5.5.5         0.0.0.0
+
+ Total Nets: 4  
+ Intra Area: 4  Inter Area: 0  ASE: 0  NSSA: 0 
+<AR3>display ip routing-table vpn-instance vpna 1.1.5.1
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  OSPF    10   1           D   10.1.35.5       GigabitEthernet0/0/2
+<AR3>display bgp vpnv4 all routing-table 1.1.5.1
+
+ BGP local router ID : 10.3.3.3
+ Local AS number : 100
+
+ Total routes of Route Distinguisher(100:3): 1
+ BGP routing table entry information of 1.1.5.1/32:
+ Imported route. 
+ Label information (Received/Applied): NULL/1028
+ From: 0.0.0.0 (0.0.0.0)
+ Route Duration: 00h05m45s  
+ Direct Out-interface: GigabitEthernet0/0/2
+ Original nexthop: 10.1.35.5
+ Qos information : 0x0
+ Ext-Community:RT <1 : 1>, OSPF DOMAIN ID <0.0.0.0 : 0>, 
+               OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.3.3.3 : 0>
+ AS-path Nil, origin incomplete, MED 2, pref-val 0, valid, local, best, select, pre 255
+ Advertised to such 1 peers:
+    10.1.1.1
+```
+
+AR1 收到 AR3 通过 MP-BGP VPNv4 发布的路由 **`1.1.5.1/32`**，BGP 下一跳为 **`10.3.3.3`**。并且 AR1 向 CE1 的 Area 0 发布 Type 3 LSA，并设置 DN Bit。
+
+```java{.line-numbers}
+<AR1>display ip routing-table vpn-instance vpna 1.1.5.1
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  IBGP    255  2          RD   10.3.3.3        GigabitEthernet0/0/1
+<AR1>display ospf 2 lsdb summary 1.1.5.1
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Sum-Net
+  Ls id     : 1.1.5.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 1019 
+  Len       : 28 
+  Options   :  E  DN  
+  seq#      : 80000001 
+  chksum    : 0x2e97
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 2
+  Priority  : Low
+```
+
+可以看到，AR4（CE1）收到了 AR1 发送过来的 **`1.1.5.1/32`** 的 Type3 LSA 并且带有 DN 标志位，因为 AR4 是普通的 CE1，因此可以使用带有 DN 标志位的 LSA 来计算并安装路由。但是 AR4 发送到 Area1 中的 **`1.1.5.1/32`** 的 Type3 LSA 就没有带有 DN 标志位了。核心原因是 OSPF 的 ABR 在跨区域传递路由时，并不是将收到的 Type 3 LSA 原封不动地转发到另一个区域，而是根据自身计算出的路由信息，重新生成一份 Type 3 LSA。新 LSA 的 DN Bit 不会自动继承原始 LSA 的 DN Bit。
+
+```java{.line-numbers}
+<AR4>display ospf 1 routing 
+
+	 OSPF Process 1 with Router ID 4.4.4.4
+		  Routing Tables 
+
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 10.1.14.0/24       1     Transit    10.1.14.4       4.4.4.4         0.0.0.0
+ 10.1.34.0/24       1     Transit    10.1.34.4       4.4.4.4         0.0.0.1
+ 10.4.4.4/32        0     Stub       10.4.4.4        4.4.4.4         0.0.0.0
+ 1.1.5.1/32         3     Inter-area 10.1.14.1       10.1.1.1        0.0.0.0
+ 10.5.5.5/32        3     Inter-area 10.1.14.1       10.1.1.1        0.0.0.0
+<AR4>display ospf 1 lsdb summary 1.1.5.1
+
+	 OSPF Process 1 with Router ID 4.4.4.4
+		         Area: 0.0.0.0
+		 Link State Database 
+
+  Type      : Sum-Net
+  Ls id     : 1.1.5.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 1137 
+  Len       : 28 
+  Options   :  E  DN  
+  seq#      : 80000001 
+  chksum    : 0x2e97
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 2
+  Priority  : Medium
+		         Area: 0.0.0.1
+		 Link State Database 
+
+  Type      : Sum-Net
+  Ls id     : 1.1.5.1
+  Adv rtr   : 4.4.4.4  
+  Ls age    : 1136 
+  Len       : 28 
+  Options   :  E  
+  seq#      : 80000001 
+  chksum    : 0xb68b
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 3
+  Priority  : Low
+```
+
+AR3 收到 AR4 发送的这条 LSA（**`1.1.5.1/32`**）中没有 DN 标志位。也就是说 PE1 发布的 **`DN=1 Type 3 LSA`**，在普通 CE1（AR4）跨区域重新生成后，新的 Type 3 LSA 已经不再携带 DN Bit，并传递到了 PE2。但是由于 AR3 同时通过 Area 0 直接从 AR5 学到 **`1.1.5.1/32`**，它正常情况下会保留到 AR5 的区域内路径，而不会优选经 AR4 返回的区域间路径。
+
+```java{.line-numbers}
+<AR3>display ospf 2 lsdb summary 1.1.5.1
+
+	 OSPF Process 2 with Router ID 10.3.3.3
+		         Area: 0.0.0.0
+		 Link State Database 
+
+		         Area: 0.0.0.1
+		 Link State Database 
+
+  Type      : Sum-Net
+  Ls id     : 1.1.5.1
+  Adv rtr   : 4.4.4.4  
+  Ls age    : 1549 
+  Len       : 28 
+  Options   :  E  
+  seq#      : 80000001 
+  chksum    : 0xb68b
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 3
+  Priority  : Medium
+<AR3>display ip routing-table vpn-instance vpna 1.1.5.1
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.5.1/32  OSPF    10   1           D   10.1.35.5       GigabitEthernet0/0/2
+```
+
+### 7.9 特殊场景下的 DN Bit 处理与 Route-tag 防环
+
+有些场景下需要关闭 DN 比特位的功能，否则会导致路由无法学习。比如当 PE 设备连接 MCE 设备场景时，MCE 设备需要计算 PE 设备发布的某些路由。如果 PE 设备发送的 LSA 的 DN 比特有置位，会导致 MCE 设备无法计算路由。
+
+华为 VRP 系统禁用 DN 置位的命令是：**`dn-bit-set disable { summary | ase | nssa }`**。参数介绍：
+
+- summary：指定不设置 Summary LSA 的 DN 位；
+- ase：指定不设置 AS-external LSA 的 DN 位；
+- nssa：指定不设置 NSSA LSA 的 DN 位。
+
+但是在实际组网中，使用 **`dn-bit-set disable`** 命令用来禁止设置 OSPF LSA 的 DN 位，可能会产生路由环路。如果设置了 ase 参数或 nssa 参数，即对于 **`AS-external-LSA`** 或 NSSA LSA，这两种 LSA 也可以通过 Route-tag 命令配置相同的 Tag 值来防止路由环路。所以，**`dn-bit-set disable`** 命令只推荐在上面描述的场景中使用。
+
+- **`dn-bit-set disable`** 命令仅支持在 OSPF 私网进程下配置，并且只在 PE 上生效。**`dn-bit-set disable`** **<font color="red">控制发送端，PE 在生成特定类型的 OSPF LSA 时，是否设置 DN Bit</font>**。
+- 执行 **`dn-bit-check disable`** 命令可以控制对端 PE 路由器接收 OSPF 路由是否检查 DN 位。**`dn-bit-check disable`** **<font color="red">控制接收端 PE 收到带有 DN Bit 的 OSPF LSA 后，是否检查该标志并据此排除这条 LSA 的路由信息</font>**。
+
+按照 IETF 的标准定义，在 CE 双归属环境中，通过在 LSA3 中设置 DN 位来避免潜在的路由环路，**在华为设备中，LSA5 和 LSA7 也可以通过另外的一种方式来阻止路由环路**。这两种 LSA（LSA5 和 LSA7）也可以使用 Route-tag 来防环。如果一台 PE 路由器设置了 Route-tag，当它将 OSPF 外部路由发布给 CE 之前会使路由带上 Route-tag。如果在同一站点的另一台 PE 路由器发现在接收到的 OSPF 外部路由中的 Route-tag 跟本端配置的一样，那么就会忽略该路由。如下所示。
+
+<div align="center">
+    <img src="mpls_static/66.png" width="450"/>
+</div>
+
+### 7.10 sham-link
+
