@@ -708,7 +708,7 @@ AR1 和 AR4 面向客户的接口（**`G0/0/1`**）均绑定至私网实例 vpna
     <img src="mpls_static/68.png" width="700"/>
 </div>
 
-此时 AR1 和 AR4 之间没有配置 sham-link，导致 AR1 去往 **`1.1.6.1/32`** 路由的下一跳为 **`172.16.1.2`**，而不是 **`10.1.12.2`**。
+此时 AR1 和 AR4 之间没有配置 sham-link，导致 AR1 去往 **`1.1.6.1/32`** 路由的下一跳为 **`172.16.1.2`**，而不是 **`10.1.4.4`**。
 
 #### 7.10.1 第一阶段实验配置
 
@@ -925,138 +925,116 @@ BGP 选出的最优路径本质上源自原本的 OSPF 路由，并未提供新�
 
 AR1 访问 **`1.1.6.1/32`** 的业务流量，最终只能沿着开销高达 101 的低速后门链路转发，完全绕开了高速的 MPLS 骨干网。这也正是后续需要引入 Sham-Link（伪连接）来重构 OSPF 逻辑拓扑的根本原因。
 
-#### 7.10.3 杂项
+#### 7.10.3 新增 sham-link 配置
 
+为解决这个问题，引入了一种 OSPF 的特殊链路——sham-link。**<font color="red">sham-link 就像一条正常的 OSPF 链路一样，有自己的接口，可以在其上建立 OSPF 邻居关系，能够传递 OSPF 中所有报文，同步 LSDB 等，但是不能传递数据报文</font>**。也就是说 sham-link 可以传递 OSPF 的 5 种控制报文（hello、DD、LSR、LSU、LSAck），但是数据报文的发送不走 sham-link，而是走底层的 MPLS VPN 标签隧道。
 
-最关键的一点是：OSPF 2 路由表、BGP vpna 路由表、vpna IP 路由表虽然都能看到 1.1.6.1/32，但它们并不是在保存同一种信息。
+并不是所有 Site 之间都需要配置 sham-link，OSPF 伪连接仅应用在属于同一个 OSPF 区域的两个 Site 之间存在后门链路的情况。如果 Site 之间没有后门链路，则不需要配置 OSPF 伪连接。如果 Site 不属于同一区域的情况，则不需要配置 OSPF 伪链路。
 
-我们从头开始。
+sham-link 可以被视为一个无编号、点到点的链路，它也会参与 SPF 的路由计算。**<font color="red">当 LSA 在伪链路中进行泛洪时，所有的 OSPF 路由类型都不会改变，不会转换成 LSA3 或者 LSA5 的类型</font>**。如果 sham-link 断掉，那么又恢复成前面所讲的机制。
 
-首先，AR6（CE2）有一个 Loopback0，地址为 1.1.6.1/32。AR6 运行 OSPF 1，将这个地址放在自己生成的 Type 1 Router-LSA 中，向 Area 0 泛洪。
+在 AR1 和 AR4 之间创建 sham-link 的过程分为 3 步：
 
-因为 AR5 和 AR6 之间存在后门链路，而且都属于客户 OSPF Area 0，所以这份 LSA 可以沿着 AR6 → AR5 → AR1 的方向传递，最终进入 AR1 的 OSPF 2 LSDB。
+- 在两个 PE 的 vpna 中创建 Sham-Link 端点 Loopback1。
+- 通过 MP-BGP VPNv4 交换两个端点的 **`/32`** 路由。
+- 在两个 PE 的 **`OSPF 2 Area 0`** 中建立 Sham-Link，Cost 设置为 1。
 
-AR1 收到这份 LSA 后，通过 SPF 算法计算出到达 1.1.6.1/32 的区域内路径，下一跳是 AR5 的 172.16.1.2，Cost 为 101（AR1 到 AR5 的 Cost 1，加上 AR5 到 AR6 的 Cost 100）。
+首先在 AR1 和 AR4 上做的配置如下，首先创建 loopback1，然后将其绑定到各自的 vpna 实例上，然后将 AR1/AR4 上的 sham-link 端点地址 **`192.168.100.1`** 和 **`192.168.100.4`** 宣告到 BGP 中。
 
-于是 AR1 的 OSPF 2 路由表出现：
+```java{.line-numbers}
+// AR1 sham-link 配置
+system-view
 
-1.1.6.1/32   Cost 101   NextHop 172.16.1.2
+interface LoopBack1
+ ip binding vpn-instance vpna
+ ip address 192.168.100.1 255.255.255.255
+quit
 
-注意，到目前为止，这条路由完全是通过 OSPF 后门链路学习的，还没有涉及 MP-BGP。
+bgp 100
+ ipv4-family vpn-instance vpna
+  network 192.168.100.1 255.255.255.255
+ quit
+quit
 
-由于 OSPF 2 绑定了 VPN 实例 vpna，这条路由经过路由优选后，就被安装进 AR1 的 vpna IP 路由表中：
+return
+// AR4 sham-link 配置
+system-view
 
-1.1.6.1/32   OSPF   Pre 10   Cost 101   172.16.1.2
+interface LoopBack1
+ ip binding vpn-instance vpna
+ ip address 192.168.100.4 255.255.255.255
+quit
 
-所以，此时 AR1 的 OSPF 2 路由表中有一条，vpna IP 路由表中也有一条，两者指向同一条实际路径：
+bgp 100
+ ipv4-family vpn-instance vpna
+  network 192.168.100.4 255.255.255.255
+ quit
+quit
 
-AR1 → AR5 → AR6。
+return
+```
 
-接下来才是你觉得奇怪的地方。
+在未配置 Sham-Link 时，客户路由穿过 MPLS VPN 骨干网后会退化为 **`Type 3 LSA`**，而经过客户后门链路传递的路由始终保持 **`Type 1/2 LSA`**（区域内路由）。依据 OSPF 选路原则（区域内路由优先于区域间路由），流量必然选择后门链路。
 
-因为你在 AR1 的 BGP ipv4-family vpn-instance vpna 地址族下配置了：
+Sham-Link 的核心作用，**<font color="red">就是在两台 PE（AR1 与 AR4）之间建立一条跨越 MPLS 骨干网的逻辑链路，将 AR1、AR4、AR5、AR6 四台设备重新融合进同一张 OSPF Area 0 的区域内拓扑图中</font>**。因此 sham-link 必须与 PE-CE 之间的接口处于同一个 OSPF 进程（如 ospf 2）及同一个区域（Area 0），才能共享同一张 LSDB（链路状态数据库）参与 SPF 计算。虽然 PE1 侧运行 ospf 2、CE1 侧运行 ospf 1（进程号仅具本地意义），但只要均归属 Area 0，**`Type 1/2 LSA`** 就能通过 sham-link 穿过 MPLS 骨干网，不再降级为 Type 3 LSA。
 
-import-route ospf 2
+sham-link 并非真实的物理网线，而是运行在 vpna 实例内的逻辑隧道。AR1 与 AR4 之间交互的 OSPF 协议报文（Hello、DD、LSU 等），本质上是以两个端点地址（**`192.168.100.1/32`** 与 **`192.168.100.4/32`**）为源、目的 IP 的私网单播报文。
 
-所以 BGP 会把刚才那条已经存在的 OSPF 路由引入自己的协议路由表。
+由于运营商骨干网中的 P 路由器（AR2、AR3）仅运行公网协议与 LDP，完全不感知 vpna 私网路由，无法直接根据这两个私网 IP 转发报文。因此，必须将这两个端点地址宣告进 BGP 的 **`ipv4-family vpn-instance vpna`** 视图中。AR1 与 AR4 通过 MP-iBGP 互换携带 RD、RT 及内层私网标签的 VPNv4 路由，并将对端的端点路由安装进本地的 vpna IP 路由表（下一跳指向对端 PE 的公网 LoopBack0）。
 
-于是，AR1 的 BGP vpna 路由表中出现：
+当 PE1 通过 sham-link 发送 OSPF 单播报文到 PE2 时，PE1 会查询 vpna 路由表，自动为其压入双层 MPLS 标签，使 OSPF 控制报文像普通 VPN 业务流量一样直接穿过 MPLS 骨干网送达对端 PE，从而建立起 Full 状态的邻接关系。
 
-*> 1.1.6.1/32   0.0.0.0   MED 102
+接着就是在 AR1 和 AR4 上创建 sham-link，从这里可以看出，因为 sham-link 归属于 ospf 2，同时 ospf 2 也绑定了 vpna 实例，所以 PE1 通过 sham-link 发送 OSPF 单播报文到 PE2 时，会去查询 vpna 的 IP 路由表。
 
-这条路由的本质是什么？
+```java{.line-numbers}
+// AR1
+ospf 2
+ area 0.0.0.0
+  sham-link 192.168.100.1 192.168.100.4 cost 1
+ quit
+quit
+// AR4
+ospf 2
+ area 0.0.0.0
+  sham-link 192.168.100.4 192.168.100.1 cost 1
+ quit
+quit
+```
 
-它并不是 AR1 新发现了一条通往 AR6 的路径，而是 BGP 把原来那条 OSPF 路由重新引入了自己的协议数据库。
+#### 7.10.4 sham-link 实验结果分析
 
-虽然它现在在 BGP 表中显示为一条 BGP 路由，但是它的原始下一跳仍然是 AR5 的 172.16.1.2，底层实际路径仍然是 AR1 → AR5 → AR6。
+**（1）控制层面**
 
-与此同时，网络中还有另一件事情正在发生。
+1. OSPF 区域内拓扑收敛与路径计算
 
-AR4（PE2）直接连接 AR6，因此 AR4 也通过 OSPF 学到了 1.1.6.1/32。
+在 AR1 与 AR4 之间建立 Sham-Link 后，双方在 ospf 2（Area 0）中形成了一条逻辑点到点（P2P）链路。该拓扑变化并未在 AR1 的 LSDB 中产生第二份描述 1.1.6.1/32 的区域内 LSA——AR1 的 LSDB 中自始至终仅保存一份由 AR6 生成的 Type 1 Router-LSA（Router 6.6.6.6，其中包含 StubNet 1.1.6.1）。
 
-AR4 同样配置了 import-route ospf 2，于是将这条路由引入自己的 BGP VPN 地址族，再通过 MP-BGP VPNv4 通告给 AR1。
+Sham-Link 实际带来的变化，是在 Router 10.1.1.1 与 Router 10.4.4.4 各自的 Type 1 Router-LSA 中，均新增了一条指向对端的 P-2-P 链路描述（Metric 等于配置的 Sham-Link 开销 1）。基于更新后的完整 Area 0 拓扑，AR1 重新执行 SPF 算法，计算出两条通往 Router 6.6.6.6（即目的网段 1.1.6.1/32）的区域内（Intra-Area）路径：
 
-这样一来，AR1 就又收到了一条关于 1.1.6.1/32 的 BGP 路由。这条路由来自 AR4，下一跳是 10.4.4.4，代表经过 MPLS VPN 骨干到达 AR6 的方向。
+Sham-Link 路径（AR1 \(\rightarrow\) AR4 \(\rightarrow\) AR6）：总开销为 \(1\text{（Sham-Link）} + 1\text{（AR4–AR6）} + 0\text{（Lo0）} = \mathbf{2}\)。
+后门链路路径（AR1 \(\rightarrow\) AR5 \(\rightarrow\) AR6）：总开销为 \(1\text{（AR1–AR5）} + 100\text{（AR5–AR6）} + 0\text{（Lo0）} = \mathbf{101}\)。
 
-因此，AR1 的 BGP vpna 路由表中，终于出现了你看到的两条路由：
+由于两条路径均属于同一区域内的 Type 1 路由，OSPF 直接依据路径开销（Cost）进行优选，最终选定总开销为 2、出接口指向 Sham-Link 的路径。
 
-*> 1.1.6.1/32   0.0.0.0     MED 102
-* i                 10.4.4.4   MED 2
+2. OSPF 路由抑制与控制权移交（RFC 4577 §4.2.7.4）
 
-第一条是 AR1 本地通过 OSPF 引入的，原始转发路径是 AR1 → AR5 → AR6。
+依据 RFC 4577 规范，Sham-Link 仅作为承载 OSPF 控制平面协议报文的逻辑链路，不直接承担业务数据转发；当某条目的网段的最优 OSPF 路径出接口为 Sham-Link 时，实际数据转发必须交由对应的 BGP VPNv4 路由执行，且该 OSPF 路由不得再次被重分发回 BGP。
 
-第二条是 AR4 通过 MP-BGP 传来的，代表另一条候选路径：AR1 → MPLS 骨干 → AR4 → AR6。
+为满足上述协议要求，华为设备在路由管理实现上采取了直接抑制机制：凡是 SPF 计算出的最优出接口为 Sham-Link 的路由，均不再写入 OSPF 协议路由表（display ospf 2 routing），也不再下发至 vpna IP 路由表。因此，1.1.6.1/32（以及对端 PE–CE 互联直连网段 172.16.2.0/24）均从 AR1 的 ospf 2 路由表中消失。
 
-为什么 BGP 路由表能同时保存这两条？
+3. BGP vpna 路由表与 vpna IP 路由表的联动更新
 
-因为 BGP 的协议路由表本来就是用来保存、比较同一目的前缀的不同 BGP 候选路径的。它允许一个前缀同时存在多条路径，再从中选出最优的一条。
+由于 vpna IP 路由表中不再存在 1.1.6.1/32 的活跃 OSPF 路由，AR1 的 BGP 进程（ipv4-family vpn-instance vpna）所配置的 import-route ospf 2 随即撤销了此前本地引入的路由（下一跳为 0.0.0.0）。
 
-在你这次实验中，BGP 经过内部选路，选择了第一条本地引入的路径，所以第一条显示 *>；第二条虽然有效，但是没有被选中，所以显示 * i。
+此时，AR1 的 BGP vpna 路由表中仅保留一条有效路径——由远端 PE（AR4）通过 MP-iBGP 传递、经 Import RT 1:1 匹配进入的 VPNv4 路由（下一跳为 AR4 的公网 LoopBack0 地址 10.4.4.4，携带私网 MPLS 标签 1028）。该路由无竞争对手地直接成为 BGP 最优路径（best, select, active），并顺利安装进 vpna IP 路由表中，指导后续业务数据包通过双层 MPLS 标签隧道经由骨干网转发。
 
-你之前的详细回显也明确写着远端路径落选的原因：
+4. 触发 import-route bgp 生成 Type 3 LSA
 
-not preferred for route type
+当来自 AR4 的 1.1.6.1/32 路由成为 vpna IP 路由表中的活跃（Active）IBGP 路由后，AR1 在 ospf 2 下配置的 import-route bgp 终于匹配到了符合引入条件的路由。又因为 AR1 与 AR4 配置了相同的 domain-id 0.0.0.10，且该路由原始属性为 OSPF 区域内路由，AR1 便在 ospf 2 的 Area 0 中为其生成了一条带有 DN 防环置位的 Type 3 Summary-LSA（LinkState ID: 1.1.6.1，AdvRouter: 10.1.1.1）。
 
-说明 BGP 在比较路由来源类型时，就优选了本地引入的路径，没有因为 AR4 的 MED 更小而改选远端路径。
+根据 RFC 4577，However, when forwarding a packet, if the preferred route for that packet has the sham link as its next hop interface, then the packet MUST be forwarded according to the corresponding BGP route. That is, it will be forwarded as if the corresponding BGP route had been the preferred route. The "corresponding BGP route" is always a VPN-IPv4 route. 然而，在转发数据包时，**<font color="red">如果该数据包的首选（最优）路由是以 Sham-Link 作为其下一跳接口的，那么该数据包必须按照对应的 BGP 路由进行转发</font>**。也就是说，它的转发方式就如同那条对应的 BGP 路由才是首选路由一样。这里的‘对应 BGP 路由’始终是一条 VPN-IPv4 路由。
 
-那么，既然 BGP 表里已经有两条，为什么 vpna IP 路由表还是只有一条？
+**（2）数据层面**
 
-因为 vpna IP 路由表并不是用来保存 BGP 所有候选路径的。它要决定的是：对于 1.1.6.1/32，AR1 最终应该通过哪个下一跳转发数据包？
 
-现在 AR1 已经有一条有效的 OSPF 路由，下一跳是 172.16.1.2。
 
-BGP 虽然也有两条候选路径，但是：
-
-本地 BGP 最优路径，本来就是从这条 OSPF 路由重新引入的，并没有创造出第二条独立的转发路径。
-
-而 AR4 传来的 BGP 路由，虽然有效，却在 BGP 内部选优时已经落选。
-
-再考虑到当前 OSPF 路由已经成为 VPN IP 路由表中的优选路由，AR1 自然继续使用原来的 OSPF 路由进行转发。
-
-因此，vpna IP 路由表最终还是：
-
-1.1.6.1/32   OSPF   10   101   172.16.1.2
-
-这就是为什么 BGP vpna 路由表有两条，而 vpna IP 路由表只有一条。
-
-最后，再回到你最开始的疑问：为什么 OSPF 2 路由表也只有一条？
-
-因为 OSPF 2 的路由表是根据 OSPF LSDB 进行计算的，它并不会直接把 BGP 表中的两条候选路径都拿进来。
-
-目前 AR1 的 OSPF LSDB 中，已经通过后门链路收到了 AR6 的 Type 1 Router-LSA，所以能够计算出到 1.1.6.1/32 的区域内路径。
-
-至于来自 AR4 的 VPNv4 路由，由于没有成为 AR1 的有效转发路径，也没有通过 import-route bgp 被重新发布成对应的 Type 3 LSA。
-
-因此 OSPF 2 仍然只有通过后门链路计算得到的这条路由。
-
-现在我们把整个过程用一句连贯的话总结起来：
-
-AR6 首先通过 OSPF 后门链路向 AR1 传播 1.1.6.1/32，AR1 的 OSPF 2 学到后，将这条路由安装到 vpna IP 路由表中；随后 AR1 的 BGP 又通过 import-route ospf 2 将这条 OSPF 路由引入自己的 BGP 表。与此同时，AR4 也通过 MP-BGP 向 AR1 通告了同一个前缀，于是 BGP 表中存在本地引入和远端学习两条候选路径。但是 BGP 最终优选了本地引入的路径，而 vpna IP 路由表继续使用原来的 OSPF 路由，因此 OSPF 2 和 vpna IP 路由表中都只显示一条路由，BGP vpna 路由表中却可以看到两条。
-
-AR4 发来的 1.1.6.1/32 实际上已经成功导入 AR1 的 BGP vpna 路由表了！只是它没有成为 vpna IP 路由表中最终使用的活跃路由。
-
-A received route will not be installed into the VRF if the BGP decision process regards some other route as preferable.各路由协议先进行自己的路由计算和选优，再由设备的路由管理机制协调各协议提供的合格路由，决定 vpna IP 路由表最终采用哪条。
-
-RFC 原文：
-
-If a received BGP VPN-IPv4 route is not installed in the VRF, nothing is reported to the CE.
-
-翻译：
-
-“如果收到的 BGP VPNv4 路由没有安装到 VRF 中，就不会向 CE 通告任何对应的路由信息。”
-
-结合你的实际实验，整个过程就是：
-
-AR1 虽然从 AR4 收到了 1.1.6.1/32 的 VPNv4 BGP 路由，但由于 AR1 已经通过 AR5–AR6 后门链路学到了相同前缀的 OSPF 区域内路由，最终 vpna IP 路由表中安装的是：
-
-Destination     Proto   Pre   Cost   NextHop
-1.1.6.1/32      OSPF    10    101    172.16.1.2
-
-也就是说，AR1 的 vpna IP 路由表中，对于 1.1.6.1/32，当前负责转发的是 OSPF 路由，而不是来自 AR4 的 BGP 路由。
-
-因此，虽然 AR1 配置了：
-
-ospf 2 router-id 10.1.1.1 vpn-instance vpna
- import-route bgp
-
-但对于 1.1.6.1/32 这个前缀，没有一条被选中用于转发的远端 BGP 路由可供重新发布到 OSPF 2，所以没有生成你期待的 Type 3 LSA。
