@@ -443,7 +443,7 @@ ospf 2 router-id 10.1.1.1 vpn-instance vpna
 
 还原后的路由会先进入 BGP 的 **`ipv4-family vpn-instance vpna`** 路由表。如果它经过 BGP 选路后成为最优路由，就会被下发到 vpna 的 IP 路由表中，协议类型显示为 IBGP。由于 ospf 2 绑定了 vpna，**<font color="red">它里面的 **`import-route bgp`** 命令只会去扫描 vpna 路由表中处于活跃（Active）状态的 BGP 路由，把它们转换成 OSPF 2 的 LSA</font>**，再通过运行 OSPF 2 协议接口 **`G0/0/0`** 发给 AR4。
 
-**（3）import-route ospf**
+**（3）import-route ospf 2**
 
 因为 ospf 2 在创建时就已经绑定了 vpna 实例，所以 AR1 通过 ospf 2 从 AR4 学到路由（比如 **`10.4.4.4/32`**）后，直接就把它放进了 vpna 的 IP 路由表中，协议类型为 OSPF。当在 bgp 100 的 **`ipv4-family vpn-instance vpna`** 视图下敲入 **`import-route ospf 2`** 时，BGP 进程就会去扫描 vpna 的 IP 路由表，执行筛选。**<font color="red">首先只看 vpna 实例路由表（不会去查询 public 路由表），接下来只在 vpna 路由表中挑选协议类型为 OSPF 2，且状态为 Active（活跃） 的路由</font>**。最后将将这些挑选出来的路由安装进 BGP 的 vpna 路由表中（可以通过 **`display bgp vpnv4 vpn-instance vpna routing-table`** 进行查看）。
 
@@ -694,3 +694,369 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
 
 ### 7.10 sham-link
 
+通过 MPLS VPN 骨干网将运行 OSPF 协议的用户站点连接起来后，用户的业务通过骨干网进行传送。为增强网络的健壮性，现在很多大型的 MPLS VPN 场景中都会部署备份路径，这些备份路径我们称之为后门链路。通过后门链路将各站点的 OSPF 区域打通后，所有的 LSA 将会保持原样从一个站点传递到另一个站点，也就是说，**OSPF 内部路由（LSA1 和 LSA2）通过后门链路传递到远端的站点还是内部路由，而内部路由穿过 MPLS VPN 骨干传递过去后变成了区域间路由（LSA3）**，这就导致两个站点之间永远选择的是后门链路，而用户期望站点之间的数据流默认以 MPLS VPN 骨干为主路径，后门链路作备用路径。
+
+<div align="center">
+    <img src="mpls_static/67.png" width="750"/>
+</div>
+
+如上图所示，用户各站点都配置在相同的区域中，后门链路使得这些区域连接在一起，从而形成了一个区域。在上述 MPLS VPN Backbone 中底层通过公网 OSPF 1（Area 0）实现骨干网中各路由器的 loopback 接口互通，并在骨干区域中部署 MPLS LDP 建立公网标签转发路径（LSP）。控制平面在两台 PE 路由器 AR1 与 AR4 之间建立 MP-iBGP（AS 100）邻居，传递带标签的 VPNv4 私网路由。
+
+AR1 和 AR4 面向客户的接口（**`G0/0/1`**）均绑定至私网实例 vpna，并通过运行在 vpna 内的 OSPF 2 与客户路由器 AR5、AR6 建立邻居，实现私网路由与 MP-BGP 的双向重分发。然后在客户站点 1（AR5）与站点 2（AR6）之间存在一条直连物理链路，同样运行 OSPF Area 0（**<font color="red">接口开销被刻意调大为 100</font>**），用于模拟企业原有的低速专线或备份链路。上述拓扑图的逻辑拓扑图如下所示：
+
+<div align="center">
+    <img src="mpls_static/68.png" width="700"/>
+</div>
+
+此时 AR1 和 AR4 之间没有配置 sham-link，导致 AR1 去往 **`1.1.6.1/32`** 路由的下一跳为 **`172.16.1.2`**，而不是 **`10.1.12.2`**。
+
+#### 7.10.1 第一阶段实验配置
+
+AR1 的配置如下所示：
+
+```java{.line-numbers}
+ sysname AR1
+#
+ip vpn-instance vpna
+ ipv4-family
+  route-distinguisher 100:1
+  vpn-target 1:1 export-extcommunity
+  vpn-target 1:1 import-extcommunity
+#
+mpls lsr-id 10.1.1.1
+mpls
+#
+mpls ldp
+#
+interface GigabitEthernet0/0/0
+ ip address 10.1.12.1 255.255.255.0 
+ mpls
+ mpls ldp
+#
+interface GigabitEthernet0/0/1
+ ip binding vpn-instance vpna
+ ip address 172.16.1.1 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.1.1.1 255.255.255.255 
+#
+bgp 100
+ router-id 1.1.1.1
+ undo default ipv4-unicast
+ peer 10.4.4.4 as-number 100 
+ peer 10.4.4.4 connect-interface LoopBack0
+ #
+ ipv4-family unicast
+  undo synchronization
+  undo peer 10.4.4.4 enable
+ # 
+ ipv4-family vpnv4
+  policy vpn-target
+  peer 10.4.4.4 enable
+ #
+ ipv4-family vpn-instance vpna 
+  import-route ospf 2
+#
+ospf 1 router-id 1.1.1.1 
+ area 0.0.0.0 
+  network 10.1.1.1 0.0.0.0 
+  network 10.1.12.0 0.0.0.255 
+#
+ospf 2 router-id 10.1.1.1 vpn-instance vpna
+ import-route bgp
+ domain-id 0.0.0.10
+ area 0.0.0.0 
+  network 172.16.1.0 0.0.0.255 
+```
+
+AR4 的配置如下所示：
+
+```java{.line-numbers}
+#
+ sysname AR4
+#
+ip vpn-instance vpna
+ ipv4-family
+  route-distinguisher 100:4
+  vpn-target 1:1 export-extcommunity
+  vpn-target 1:1 import-extcommunity
+#
+mpls lsr-id 10.4.4.4
+mpls
+#
+mpls ldp
+#
+interface GigabitEthernet0/0/0
+ ip address 10.1.34.4 255.255.255.0 
+ mpls
+ mpls ldp
+#
+interface GigabitEthernet0/0/1
+ ip binding vpn-instance vpna
+ ip address 172.16.2.1 255.255.255.0 
+#
+interface LoopBack0
+ ip address 10.4.4.4 255.255.255.255 
+#
+bgp 100
+ router-id 4.4.4.4
+ undo default ipv4-unicast
+ peer 10.1.1.1 as-number 100 
+ peer 10.1.1.1 connect-interface LoopBack0
+ #
+ ipv4-family unicast
+  undo synchronization
+  undo peer 10.1.1.1 enable
+ # 
+ ipv4-family vpnv4
+  policy vpn-target
+  peer 10.1.1.1 enable
+ #
+ ipv4-family vpn-instance vpna 
+  import-route ospf 2
+#
+ospf 1 router-id 4.4.4.4 
+ area 0.0.0.0 
+  network 10.1.34.0 0.0.0.255 
+  network 10.4.4.4 0.0.0.0 
+#
+ospf 2 router-id 10.4.4.4 vpn-instance vpna
+ import-route bgp
+ domain-id 0.0.0.10
+ area 0.0.0.0 
+  network 172.16.2.0 0.0.0.255 
+```
+
+#### 7.10.2 第一阶段实验结果分析
+
+客户端的 AR5 与 AR6 之间存在一条直连后门链路，且两台设备与 AR1 均处于 OSPF Area 0 中。AR6 将自己的环回口地址 **`1.1.6.1/32`** 封装在 Type 1 Router-LSA 中向区域内泛洪，该 LSA 顺着后门链路经由 AR5 直接传递到了 AR1 的 ospf 2 进程中，如下所示。
+
+```java{.line-numbers}
+<AR1>display ospf 2 lsdb router 6.6.6.6
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Router
+  Ls id     : 6.6.6.6
+  Adv rtr   : 6.6.6.6  
+  Ls age    : 1574 
+  Len       : 60 
+  Options   :  E  
+  seq#      : 80000008 
+  chksum    : 0x8eed
+  Link count: 3
+   * Link ID: 172.16.2.1   
+     Data   : 172.16.2.2   
+     Link Type: TransNet     
+     Metric : 1
+   * Link ID: 10.1.56.6    
+     Data   : 10.1.56.6    
+     Link Type: TransNet     
+     Metric : 100
+   * Link ID: 1.1.6.1      
+     Data   : 255.255.255.255 
+     Link Type: StubNet      
+     Metric : 0 
+     Priority : Medium
+```
+
+AR1 的 ospf 2 收到该 LSA 后，通过 SPF 算法计算出一条到达 **`1.1.6.1/32`** 的区域内（Intra-Area）路由（下一跳为 AR5 的 **`172.16.1.2`**，总开销 Cost 为 **`101`**）。**<font color="red">由于 ospf 2 绑定了 **`vpn-instance vpna`**，这条计算出的路由直接被提交并安装进 vpna 的 IP 路由表中，协议类型为 OSPF，默认优先级为 10</font>**。至此，去往 **`1.1.6.1/32`** 的转发路径已经在 vpna IP 路由表中确立。
+
+```java{.line-numbers}
+<AR1>display ospf 2 routing 1.1.6.1
+	 OSPF Process 2 with Router ID 10.1.1.1
+ Destination : 1.1.6.1/32         
+ AdverRouter : 6.6.6.6                  Area      : 0.0.0.0  
+ Cost        : 101                      Type      : Stub 
+ NextHop     : 172.16.1.2               Interface : GigabitEthernet0/0/1  
+ Priority    : Medium                   Age       : 00h26m56s  
+<AR1>display ip routing-table vpn-instance vpna 1.1.6.1
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.6.1/32  OSPF    10   101         D   172.16.1.2      GigabitEthernet0/0/1
+```
+
+与此同时，AR1 的 BGP 进程（**`ipv4-family vpn-instance vpna`**）通过两个不同的渠道，收集到了关于 **`1.1.6.1/32`** 的两条候选路由。第一个是由于 AR1 在 BGP 实例视图下配置了 **`import-route ospf 2`**，BGP 会扫描 vpna IP 路由表中处于活跃（Active）状态的 OSPF 路由，将刚安装进去的 **`1.1.6.1/32`** 提取到自己的 BGP 表中，如下所示，是 BGP vpna 路由表中关于 **`1.1.6.1/32`** 路由的详细信息。
+
+```java{.line-numbers}
+<AR1>display bgp vpnv4 vpn-instance vpna routing-table 1.1.6.1 32
+
+ BGP local router ID : 1.1.1.1
+ Local AS number : 100
+
+ VPN-Instance vpna, Router ID 1.1.1.1:
+ Paths:   2 available, 1 best, 1 select
+ BGP routing table entry information of 1.1.6.1/32:
+ Imported route. 
+ From: 0.0.0.0 (0.0.0.0)
+ Route Duration: 00h34m56s  
+ Direct Out-interface: GigabitEthernet0/0/1
+ Original nexthop: 172.16.1.2
+ Qos information : 0x0
+ Ext-Community:OSPF DOMAIN ID <0.0.0.10 : 0>, OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.1.1.1 : 0>
+ AS-path Nil, origin incomplete, MED 102, pref-val 0, valid, local, best, select, pre 10
+ Not advertised to any peer yet
+```
+
+第二个是直连 AR6 的对端 PE（AR4）同样通过 OSPF 学到了 **`1.1.6.1/32`**（Cost 为 1），并将其引入 BGP，附加 RD 和 **`Export RT 1:1`** 后，封装成 VPNv4 路由通过 MP-BGP 传给 AR1。AR1 收到后校验本地 **`Import RT 1:1`** 匹配成功，便将这条路径也收纳进 BGP 的 vpna 路由表中。
+
+```java{.line-numbers}
+ BGP routing table entry information of 1.1.6.1/32:
+ Label information (Received/Applied): 1028/NULL
+ From: 10.4.4.4 (4.4.4.4)
+ Route Duration: 00h34m39s  
+ Relay Tunnel Out-Interface: GigabitEthernet0/0/0
+ Relay token: 0x5
+ Original nexthop: 10.4.4.4
+ Qos information : 0x0
+ Ext-Community:RT <1 : 1>, OSPF DOMAIN ID <0.0.0.10 : 0>, OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.4.4.4 : 0>
+ AS-path Nil, origin incomplete, MED 2, localpref 100, pref-val 0, valid, internal, pre 255, IGP cost 3, not preferred for route type
+ Not advertised to any peer yet
+```
+
+面对 **`1.1.6.1/32`** 的两条有效路径，BGP 需要在自己的路由表内部执行选路决策。虽然从 AR4 学来的路由 MED 值仅为 2（远小于本地引入路由的 102），但依据华为设备的 BGP 选路原则，本地通过 **`import-route`** 引入的路由（下一跳为 **`0.0.0.0`**），**<font color="red">根据 BGP 选路原则的第二个原则，`import-route` 命令引入的路由要优于从对等体学习的路由</font>**。其路径类型优先级高于从 IBGP 对等体学习到的路由（下一跳为 **`10.4.4.4`**）。
+
+因此，在比较到 MED 属性之前，选路就已经分出胜负，而 AR4 传来的远端路由因 **`not preferred for route type`**（路由类型不优）在 BGP 内部中直接落选，仅保留 * i 状态。
+
+BGP 选出的最优路径本质上源自原本的 OSPF 路由，并未提供新的转发方向；而真正指向 MPLS 骨干网的远端 BGP 路由在内部选路中已经出局。因此，vpna IP 路由表继续保留唯一的活跃路由 **`1.1.6.1/32`**，也就是由 ospf 2 提供的后门链路路由。ospf 2 下的 **`import-route bgp`** 命令只会从 vpna IP 路由表中抓取处于活跃（Active）状态的 BGP 路由进行重分发。由于当前 vpna IP 路由表中 **`1.1.6.1/32`** 的协议类型是 OSPF，不存在活跃的 BGP 路由，**`import-route bgp`** 无路由可引，自然也就不会向 AR5 泛洪对应的 Type 3 LSA。
+
+AR1 访问 **`1.1.6.1/32`** 的业务流量，最终只能沿着开销高达 101 的低速后门链路转发，完全绕开了高速的 MPLS 骨干网。这也正是后续需要引入 Sham-Link（伪连接）来重构 OSPF 逻辑拓扑的根本原因。
+
+#### 7.10.3 杂项
+
+
+最关键的一点是：OSPF 2 路由表、BGP vpna 路由表、vpna IP 路由表虽然都能看到 1.1.6.1/32，但它们并不是在保存同一种信息。
+
+我们从头开始。
+
+首先，AR6（CE2）有一个 Loopback0，地址为 1.1.6.1/32。AR6 运行 OSPF 1，将这个地址放在自己生成的 Type 1 Router-LSA 中，向 Area 0 泛洪。
+
+因为 AR5 和 AR6 之间存在后门链路，而且都属于客户 OSPF Area 0，所以这份 LSA 可以沿着 AR6 → AR5 → AR1 的方向传递，最终进入 AR1 的 OSPF 2 LSDB。
+
+AR1 收到这份 LSA 后，通过 SPF 算法计算出到达 1.1.6.1/32 的区域内路径，下一跳是 AR5 的 172.16.1.2，Cost 为 101（AR1 到 AR5 的 Cost 1，加上 AR5 到 AR6 的 Cost 100）。
+
+于是 AR1 的 OSPF 2 路由表出现：
+
+1.1.6.1/32   Cost 101   NextHop 172.16.1.2
+
+注意，到目前为止，这条路由完全是通过 OSPF 后门链路学习的，还没有涉及 MP-BGP。
+
+由于 OSPF 2 绑定了 VPN 实例 vpna，这条路由经过路由优选后，就被安装进 AR1 的 vpna IP 路由表中：
+
+1.1.6.1/32   OSPF   Pre 10   Cost 101   172.16.1.2
+
+所以，此时 AR1 的 OSPF 2 路由表中有一条，vpna IP 路由表中也有一条，两者指向同一条实际路径：
+
+AR1 → AR5 → AR6。
+
+接下来才是你觉得奇怪的地方。
+
+因为你在 AR1 的 BGP ipv4-family vpn-instance vpna 地址族下配置了：
+
+import-route ospf 2
+
+所以 BGP 会把刚才那条已经存在的 OSPF 路由引入自己的协议路由表。
+
+于是，AR1 的 BGP vpna 路由表中出现：
+
+*> 1.1.6.1/32   0.0.0.0   MED 102
+
+这条路由的本质是什么？
+
+它并不是 AR1 新发现了一条通往 AR6 的路径，而是 BGP 把原来那条 OSPF 路由重新引入了自己的协议数据库。
+
+虽然它现在在 BGP 表中显示为一条 BGP 路由，但是它的原始下一跳仍然是 AR5 的 172.16.1.2，底层实际路径仍然是 AR1 → AR5 → AR6。
+
+与此同时，网络中还有另一件事情正在发生。
+
+AR4（PE2）直接连接 AR6，因此 AR4 也通过 OSPF 学到了 1.1.6.1/32。
+
+AR4 同样配置了 import-route ospf 2，于是将这条路由引入自己的 BGP VPN 地址族，再通过 MP-BGP VPNv4 通告给 AR1。
+
+这样一来，AR1 就又收到了一条关于 1.1.6.1/32 的 BGP 路由。这条路由来自 AR4，下一跳是 10.4.4.4，代表经过 MPLS VPN 骨干到达 AR6 的方向。
+
+因此，AR1 的 BGP vpna 路由表中，终于出现了你看到的两条路由：
+
+*> 1.1.6.1/32   0.0.0.0     MED 102
+* i                 10.4.4.4   MED 2
+
+第一条是 AR1 本地通过 OSPF 引入的，原始转发路径是 AR1 → AR5 → AR6。
+
+第二条是 AR4 通过 MP-BGP 传来的，代表另一条候选路径：AR1 → MPLS 骨干 → AR4 → AR6。
+
+为什么 BGP 路由表能同时保存这两条？
+
+因为 BGP 的协议路由表本来就是用来保存、比较同一目的前缀的不同 BGP 候选路径的。它允许一个前缀同时存在多条路径，再从中选出最优的一条。
+
+在你这次实验中，BGP 经过内部选路，选择了第一条本地引入的路径，所以第一条显示 *>；第二条虽然有效，但是没有被选中，所以显示 * i。
+
+你之前的详细回显也明确写着远端路径落选的原因：
+
+not preferred for route type
+
+说明 BGP 在比较路由来源类型时，就优选了本地引入的路径，没有因为 AR4 的 MED 更小而改选远端路径。
+
+那么，既然 BGP 表里已经有两条，为什么 vpna IP 路由表还是只有一条？
+
+因为 vpna IP 路由表并不是用来保存 BGP 所有候选路径的。它要决定的是：对于 1.1.6.1/32，AR1 最终应该通过哪个下一跳转发数据包？
+
+现在 AR1 已经有一条有效的 OSPF 路由，下一跳是 172.16.1.2。
+
+BGP 虽然也有两条候选路径，但是：
+
+本地 BGP 最优路径，本来就是从这条 OSPF 路由重新引入的，并没有创造出第二条独立的转发路径。
+
+而 AR4 传来的 BGP 路由，虽然有效，却在 BGP 内部选优时已经落选。
+
+再考虑到当前 OSPF 路由已经成为 VPN IP 路由表中的优选路由，AR1 自然继续使用原来的 OSPF 路由进行转发。
+
+因此，vpna IP 路由表最终还是：
+
+1.1.6.1/32   OSPF   10   101   172.16.1.2
+
+这就是为什么 BGP vpna 路由表有两条，而 vpna IP 路由表只有一条。
+
+最后，再回到你最开始的疑问：为什么 OSPF 2 路由表也只有一条？
+
+因为 OSPF 2 的路由表是根据 OSPF LSDB 进行计算的，它并不会直接把 BGP 表中的两条候选路径都拿进来。
+
+目前 AR1 的 OSPF LSDB 中，已经通过后门链路收到了 AR6 的 Type 1 Router-LSA，所以能够计算出到 1.1.6.1/32 的区域内路径。
+
+至于来自 AR4 的 VPNv4 路由，由于没有成为 AR1 的有效转发路径，也没有通过 import-route bgp 被重新发布成对应的 Type 3 LSA。
+
+因此 OSPF 2 仍然只有通过后门链路计算得到的这条路由。
+
+现在我们把整个过程用一句连贯的话总结起来：
+
+AR6 首先通过 OSPF 后门链路向 AR1 传播 1.1.6.1/32，AR1 的 OSPF 2 学到后，将这条路由安装到 vpna IP 路由表中；随后 AR1 的 BGP 又通过 import-route ospf 2 将这条 OSPF 路由引入自己的 BGP 表。与此同时，AR4 也通过 MP-BGP 向 AR1 通告了同一个前缀，于是 BGP 表中存在本地引入和远端学习两条候选路径。但是 BGP 最终优选了本地引入的路径，而 vpna IP 路由表继续使用原来的 OSPF 路由，因此 OSPF 2 和 vpna IP 路由表中都只显示一条路由，BGP vpna 路由表中却可以看到两条。
+
+AR4 发来的 1.1.6.1/32 实际上已经成功导入 AR1 的 BGP vpna 路由表了！只是它没有成为 vpna IP 路由表中最终使用的活跃路由。
+
+A received route will not be installed into the VRF if the BGP decision process regards some other route as preferable.各路由协议先进行自己的路由计算和选优，再由设备的路由管理机制协调各协议提供的合格路由，决定 vpna IP 路由表最终采用哪条。
+
+RFC 原文：
+
+If a received BGP VPN-IPv4 route is not installed in the VRF, nothing is reported to the CE.
+
+翻译：
+
+“如果收到的 BGP VPNv4 路由没有安装到 VRF 中，就不会向 CE 通告任何对应的路由信息。”
+
+结合你的实际实验，整个过程就是：
+
+AR1 虽然从 AR4 收到了 1.1.6.1/32 的 VPNv4 BGP 路由，但由于 AR1 已经通过 AR5–AR6 后门链路学到了相同前缀的 OSPF 区域内路由，最终 vpna IP 路由表中安装的是：
+
+Destination     Proto   Pre   Cost   NextHop
+1.1.6.1/32      OSPF    10    101    172.16.1.2
+
+也就是说，AR1 的 vpna IP 路由表中，对于 1.1.6.1/32，当前负责转发的是 OSPF 路由，而不是来自 AR4 的 BGP 路由。
+
+因此，虽然 AR1 配置了：
+
+ospf 2 router-id 10.1.1.1 vpn-instance vpna
+ import-route bgp
+
+但对于 1.1.6.1/32 这个前缀，没有一条被选中用于转发的远端 BGP 路由可供重新发布到 OSPF 2，所以没有生成你期待的 Type 3 LSA。
