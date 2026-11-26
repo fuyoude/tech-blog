@@ -708,7 +708,17 @@ AR1 和 AR4 面向客户的接口（**`G0/0/1`**）均绑定至私网实例 vpna
     <img src="mpls_static/68.png" width="700"/>
 </div>
 
-此时 AR1 和 AR4 之间没有配置 sham-link，导致 AR1 去往 **`1.1.6.1/32`** 路由的下一跳为 **`172.16.1.2`**，而不是 **`10.1.4.4`**。
+此时 AR1 和 AR4 之间没有配置 sham-link，导致 AR1 去往 **`1.1.6.1/32`** 路由的下一跳为 **`172.16.1.2`**，而不是 **`10.4.4.4`**。
+
+sham-link 的 Cost 默认为 1，也通过设置 sham-link 的开销值来保证数据流走的是骨干网链路而非后门链路。sham-link 建立在两台 PE 路由器之间，要求两台 PE 路由器分别在对应的 VRF 中建立一个 32 位掩码的环回接口来充当 sham-link 的端点，并且需要将这个地址宣告进 iBGP，BGP 使用 Route-type 值 129 的扩展团体属性将 sham-link 的端点地址通告给其他 PE。
+
+在区域视图下使用 sham-link 命令建立 sham-link，后面加上源和目标端点环回口地址。在 sham-link 建好后，注意，不能把 sham-link 的端点地址宣告进 VRF 下的 OSPF 进程，否则会导致 sham-link 抖动。
+
+至此，总结一下在 PE 上部署 sham-link 的几点注意事项。
+
+- 用于建立 sham-link 用的端点地址的掩码必须是 32 位的。
+- 必须将端点地址宣告进 BGP，不能宣告到 VPN 实例的 OSPF 中。
+- 用于 sham-link 端点的接口必须属于特定的 VRF。
 
 #### 7.10.1 第一阶段实验配置
 
@@ -917,7 +927,7 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
  Not advertised to any peer yet
 ```
 
-面对 **`1.1.6.1/32`** 的两条有效路径，BGP 需要在自己的路由表内部执行选路决策。虽然从 AR4 学来的路由 MED 值仅为 2（远小于本地引入路由的 102），但依据华为设备的 BGP 选路原则，本地通过 **`import-route`** 引入的路由（下一跳为 **`0.0.0.0`**），**<font color="red">根据 BGP 选路原则的第二个原则，`import-route` 命令引入的路由要优于从对等体学习的路由</font>**。其路径类型优先级高于从 IBGP 对等体学习到的路由（下一跳为 **`10.4.4.4`**）。
+面对 **`1.1.6.1/32`** 的两条有效路径，BGP 需要在自己的路由表内部执行选路决策。虽然从 AR4 学来的路由 MED 值仅为 2（远小于本地引入路由的 102），但依据华为设备的 BGP 选路原则，本地通过 **`import-route`** 引入的路由（下一跳为 **`0.0.0.0`**），**<font color="red">根据 BGP 选路原则的第三个原则，`import-route` 命令引入的路由要优于从对等体学习的路由</font>**。其路径类型优先级高于从 IBGP 对等体学习到的路由（下一跳为 **`10.4.4.4`**）。
 
 因此，在比较到 MED 属性之前，选路就已经分出胜负，而 AR4 传来的远端路由因 **`not preferred for route type`**（路由类型不优）在 BGP 内部中直接落选，仅保留 * i 状态。
 
@@ -982,7 +992,7 @@ sham-link 并非真实的物理网线，而是运行在 vpna 实例内的逻辑�
 
 由于运营商骨干网中的 P 路由器（AR2、AR3）仅运行公网协议与 LDP，完全不感知 vpna 私网路由，无法直接根据这两个私网 IP 转发报文。因此，必须将这两个端点地址宣告进 BGP 的 **`ipv4-family vpn-instance vpna`** 视图中。AR1 与 AR4 通过 MP-iBGP 互换携带 RD、RT 及内层私网标签的 VPNv4 路由，并将对端的端点路由安装进本地的 vpna IP 路由表（下一跳指向对端 PE 的公网 LoopBack0）。
 
-当 PE1 通过 sham-link 发送 OSPF 单播报文到 PE2 时，PE1 会查询 vpna 路由表，自动为其压入双层 MPLS 标签，使 OSPF 控制报文像普通 VPN 业务流量一样直接穿过 MPLS 骨干网送达对端 PE，从而建立起 Full 状态的邻接关系。
+当 PE1 通过 sham-link 发送 OSPF 单播报文到 PE2 时，**<font color="blue">PE1 会查询 vpna 路由表（目的地址为 PE2 的 **`192.168.100.4`** 单播地址），自动为其压入双层 MPLS 标签，使 OSPF 控制报文像普通 VPN 业务流量一样直接穿过 MPLS 骨干网送达对端 PE</font>**，从而建立起 Full 状态的邻接关系。
 
 接着就是在 AR1 和 AR4 上创建 sham-link，从这里可以看出，因为 sham-link 归属于 ospf 2，同时 ospf 2 也绑定了 vpna 实例，所以 PE1 通过 sham-link 发送 OSPF 单播报文到 PE2 时，会去查询 vpna 的 IP 路由表。
 
@@ -1001,40 +1011,334 @@ ospf 2
 quit
 ```
 
-#### 7.10.4 sham-link 实验结果分析
+#### 7.10.4 sham-link 实验控制层面
 
-**（1）控制层面**
+**（1）OSPF 区域内拓扑收敛**
 
-1. OSPF 区域内拓扑收敛与路径计算
+在 AR1 与 AR4 之间建立 Sham-Link 后，双方在 ospf 2（Area 0）中形成了一条逻辑点到点（P2P）链路。sham-link 创建后，在 **`router 10.1.1.1`** 与 **`router 10.4.4.4`** 各自的 Type 1 Router-LSA 中，均新增了一条指向对端的 P2P 链路描述。
 
-在 AR1 与 AR4 之间建立 Sham-Link 后，双方在 ospf 2（Area 0）中形成了一条逻辑点到点（P2P）链路。该拓扑变化并未在 AR1 的 LSDB 中产生第二份描述 1.1.6.1/32 的区域内 LSA——AR1 的 LSDB 中自始至终仅保存一份由 AR6 生成的 Type 1 Router-LSA（Router 6.6.6.6，其中包含 StubNet 1.1.6.1）。
+针对 AR1 的 **`G0/0/0`** 和 **`G0/0/1`** 进行抓包，可以看到 AR6 通过 **`AR6-AR5-AR1`** 传递过来的 **`Router 6.6.6.6 Type1 LSA`**。但是没有收到 AR6 通过 **`AR6-AR4-sham-link-AR1`** 传递过来的 **`Router 6.6.6.6 Type1 LSA`**。
 
-Sham-Link 实际带来的变化，是在 Router 10.1.1.1 与 Router 10.4.4.4 各自的 Type 1 Router-LSA 中，均新增了一条指向对端的 P-2-P 链路描述（Metric 等于配置的 Sham-Link 开销 1）。基于更新后的完整 Area 0 拓扑，AR1 重新执行 SPF 算法，计算出两条通往 Router 6.6.6.6（即目的网段 1.1.6.1/32）的区域内（Intra-Area）路径：
+```java{.line-numbers}
+Frame 94: 122 bytes on wire (976 bits), 122 bytes captured (976 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_d5:70:29 (00:e0:fc:d5:70:29), Dst: IPv4mcast_05 (01:00:5e:00:00:05)
+Internet Protocol Version 4, Src: 172.16.1.2, Dst: 224.0.0.5
+Open Shortest Path First
+    OSPF Header
+    LS Update Packet
+        Number of LSAs: 1
+        LSA-type 1 (Router-LSA), len 60
+            .000 0000 0000 0010 = LS Age (seconds): 2
+            0... .... .... .... = Do Not Age Flag: 0
+            Options: 0x02, (E) External Routing
+            LS Type: Router-LSA (1)
+            Link State ID: 6.6.6.6
+            Advertising Router: 6.6.6.6
+            Sequence Number: 0x8000000a
+            Checksum: 0xaec9
+            Length: 60
+            Flags: 0x00
+            Number of Links: 3
+            Type: Transit  ID: 172.16.2.1      Data: 172.16.2.2      Metric: 3
+            Type: Transit  ID: 10.1.56.6       Data: 10.1.56.6       Metric: 100
+            Type: Stub     ID: 1.1.6.1         Data: 255.255.255.255 Metric: 0
+```
 
-Sham-Link 路径（AR1 \(\rightarrow\) AR4 \(\rightarrow\) AR6）：总开销为 \(1\text{（Sham-Link）} + 1\text{（AR4–AR6）} + 0\text{（Lo0）} = \mathbf{2}\)。
-后门链路路径（AR1 \(\rightarrow\) AR5 \(\rightarrow\) AR6）：总开销为 \(1\text{（AR1–AR5）} + 100\text{（AR5–AR6）} + 0\text{（Lo0）} = \mathbf{101}\)。
+以下 Frame 129 是 AR4 发送给 AR1 的 DD 报文，包含 **`6.6.6.6 Router LSA`**，Frame 128 是 AR1 发送给 AR4 的 DD 报文，也包含同样的 **`6.6.6.6 Router LSA`**。OSPF 建立邻接关系初期，双方通过 DB Description (DD) 报文交换数据库摘要，而非直接泛洪完整 LSA（Body）。DD 报文先告诉对端我这里有哪些 LSA、版本，从而让对端能够判断哪些 LSA 是一致的，哪些 LSA 缺失，哪些 LSA 版本较旧。而真正缺失或需要更新的完整 LSA，则由后续的 LSR/LSU 机制来请求和传送。
 
-由于两条路径均属于同一区域内的 Type 1 路由，OSPF 直接依据路径开销（Cost）进行优选，最终选定总开销为 2、出接口指向 Sham-Link 的路径。
+因此 AR1 通过后门链路（AR5）已经拥有了 **`6.6.6.6 Router-LSA`** 的完整实例，它在收到 AR4 的 DD 摘要时，会发现本地 LSDB 中已存在相同版本。由于本地已有，AR1 不会向 AR4 发送 LSR 请求该 LSA。因为没有请求，AR4 自然不会发送对应的 LSU。
 
-2. OSPF 路由抑制与控制权移交（RFC 4577 §4.2.7.4）
+```java{.line-numbers}
+Frame 129: 250 bytes on wire (2000 bits), 250 bytes captured (2000 bits) on interface -, id 0
+MultiProtocol Label Switching Header, Label: 1027, Exp: 6, S: 1, TTL: 253
+Internet Protocol Version 4, Src: 192.168.100.4, Dst: 192.168.100.1
+Open Shortest Path First
+    OSPF Header
+        Version: 2
+        Message Type: DB Description (2)
+        Packet Length: 212
+        Source OSPF Router: 10.4.4.4
+        Area ID: 0.0.0.0 (Backbone)
+        Checksum: 0x611d [correct]
+        Auth Type: Null (0)
+        Auth Data (none): 0000000000000000
+    OSPF DB Description
+    // 省略其余 lsa 摘要
+    LSA-type 1 (Router-LSA), len 60
+        .000 0000 0011 0011 = LS Age (seconds): 51
+        0... .... .... .... = Do Not Age Flag: 0
+        Options: 0x02, (E) External Routing
+        LS Type: Router-LSA (1)
+        Link State ID: 6.6.6.6
+        Advertising Router: 6.6.6.6
+        Sequence Number: 0x80000009
+        Checksum: 0x8cee
+        Length: 60
+Frame 128: 254 bytes on wire (2032 bits), 254 bytes captured (2032 bits) on interface -, id 0
+MultiProtocol Label Switching Header, Label: 1025, Exp: 6, S: 0, TTL: 255
+MultiProtocol Label Switching Header, Label: 1027, Exp: 6, S: 1, TTL: 255
+Internet Protocol Version 4, Src: 192.168.100.1, Dst: 192.168.100.4
+Open Shortest Path First
+    OSPF Header
+        Version: 2
+        Message Type: DB Description (2)
+        Packet Length: 212
+        Source OSPF Router: 10.1.1.1
+        Area ID: 0.0.0.0 (Backbone)
+        Checksum: 0x641b [correct]
+        Auth Type: Null (0)
+        Auth Data (none): 0000000000000000
+    OSPF DB Description
+    // 省略其余 lsa 摘要
+    LSA-type 1 (Router-LSA), len 60
+        .000 0000 0011 0101 = LS Age (seconds): 53
+        0... .... .... .... = Do Not Age Flag: 0
+        Options: 0x02, (E) External Routing
+        LS Type: Router-LSA (1)
+        Link State ID: 6.6.6.6
+        Advertising Router: 6.6.6.6
+        Sequence Number: 0x80000009
+        Checksum: 0x8cee
+        Length: 60
+```
 
-依据 RFC 4577 规范，Sham-Link 仅作为承载 OSPF 控制平面协议报文的逻辑链路，不直接承担业务数据转发；当某条目的网段的最优 OSPF 路径出接口为 Sham-Link 时，实际数据转发必须交由对应的 BGP VPNv4 路由执行，且该 OSPF 路由不得再次被重分发回 BGP。
+即使 AR1 没有从 AR4 收到 **`6.6.6.6 Router-LSA`**，AR1 也可以优选 Sham-Link，**<font color="red">这是因为 OSPF 选路依据的是整个 Area 的 LSDB 所描述的网络拓扑，而不是某条 LSA 从哪个邻居接收</font>**。在建立 sham-link 之前，AR1 的 LSDB 已经拥有四台路由器的 Router-LSA 和三个传输网络的 Network-LSA。因此，AR1 到达 **`1.1.6.1/32`** 的区域内路径为 **`AR1->AR5->AR6->Loopback0`**，cost 为 101。
 
-为满足上述协议要求，华为设备在路由管理实现上采取了直接抑制机制：凡是 SPF 计算出的最优出接口为 Sham-Link 的路由，均不再写入 OSPF 协议路由表（display ospf 2 routing），也不再下发至 vpna IP 路由表。因此，1.1.6.1/32（以及对端 PE–CE 互联直连网段 172.16.2.0/24）均从 AR1 的 ospf 2 路由表中消失。
+<div align="center">
+    <img src="mpls_static/69.png" width="450"/>
+</div>
 
-3. BGP vpna 路由表与 vpna IP 路由表的联动更新
+在 sham-link 建立好之后，AR1 和 AR4 的 OSPF 邻接关系达到 Full，两台 PE 在各自的 Router-LSA 中增加指向对方的 P2P 链路信息。AR6 的 Router-LSA 完全不需要发生变化。**<font color="red">因此 Sham-Link 的本质不是为 **`1.1.6.1/32`** 新增一条 LSA，而是为整个 Area 0 的拓扑新增一条可供 SPF 使用的逻辑链路</font>**，如下所示。
 
-由于 vpna IP 路由表中不再存在 1.1.6.1/32 的活跃 OSPF 路由，AR1 的 BGP 进程（ipv4-family vpn-instance vpna）所配置的 import-route ospf 2 随即撤销了此前本地引入的路由（下一跳为 0.0.0.0）。
+<div align="center">
+    <img src="mpls_static/70.png" width="450"/>
+</div>
 
-此时，AR1 的 BGP vpna 路由表中仅保留一条有效路径——由远端 PE（AR4）通过 MP-iBGP 传递、经 Import RT 1:1 匹配进入的 VPNv4 路由（下一跳为 AR4 的公网 LoopBack0 地址 10.4.4.4，携带私网 MPLS 标签 1028）。该路由无竞争对手地直接成为 BGP 最优路径（best, select, active），并顺利安装进 vpna IP 路由表中，指导后续业务数据包通过双层 MPLS 标签隧道经由骨干网转发。
+**（2）OSPF 区域内路径计算**
 
-4. 触发 import-route bgp 生成 Type 3 LSA
+sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link 可知，AR1 可以通过一条 cost 为 1 的 P2P 路径到达 AR4。
 
-当来自 AR4 的 1.1.6.1/32 路由成为 vpna IP 路由表中的活跃（Active）IBGP 路由后，AR1 在 ospf 2 下配置的 import-route bgp 终于匹配到了符合引入条件的路由。又因为 AR1 与 AR4 配置了相同的 domain-id 0.0.0.10，且该路由原始属性为 OSPF 区域内路由，AR1 便在 ospf 2 的 Area 0 中为其生成了一条带有 DN 防环置位的 Type 3 Summary-LSA（LinkState ID: 1.1.6.1，AdvRouter: 10.1.1.1）。
+```java{.line-numbers}
+<AR1>display ospf 2 lsdb router 10.1.1.1
 
-根据 RFC 4577，However, when forwarding a packet, if the preferred route for that packet has the sham link as its next hop interface, then the packet MUST be forwarded according to the corresponding BGP route. That is, it will be forwarded as if the corresponding BGP route had been the preferred route. The "corresponding BGP route" is always a VPN-IPv4 route. 然而，在转发数据包时，**<font color="red">如果该数据包的首选（最优）路由是以 Sham-Link 作为其下一跳接口的，那么该数据包必须按照对应的 BGP 路由进行转发</font>**。也就是说，它的转发方式就如同那条对应的 BGP 路由才是首选路由一样。这里的‘对应 BGP 路由’始终是一条 VPN-IPv4 路由。
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Router
+  Ls id     : 10.1.1.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 800 
+  Len       : 48 
+  Options   :  ASBR  ABR  E  
+  seq#      : 8000000b 
+  chksum    : 0xf097
+  Link count: 2
+   * Link ID: 172.16.1.1   
+     Data   : 172.16.1.1   
+     Link Type: TransNet     
+     Metric : 1
+   * Link ID: 10.4.4.4     
+     Data   : 0.127.128.1  
+     Link Type: P-2-P        
+     Metric : 1
+```
 
-**（2）数据层面**
+接下来，AR1 在自己的 LSDB 中查找 **`10.4.4.4`** 的 Router-LSA，下面的输出有 2 个关键信息，首先 AR4 存在一条指回 AR1 的点到点链路，同时 AR4 连接着 **`172.16.2.0/24`** 传输网络。
 
+```java{.line-numbers}
+<AR1>display ospf 2 lsdb router 10.4.4.4
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Router
+  Ls id     : 10.4.4.4
+  Adv rtr   : 10.4.4.4  
+  Ls age    : 914 
+  Len       : 48 
+  Options   :  ASBR  ABR  E  
+  seq#      : 8000000b 
+  chksum    : 0xa6d6
+  Link count: 2
+   * Link ID: 172.16.2.1   
+     Data   : 172.16.2.1   
+     Link Type: TransNet     
+     Metric : 1
+   * Link ID: 10.1.1.1     
+     Data   : 0.127.128.1  
+     Link Type: P-2-P        
+     Metric : 1
+```
 
+接下来，AR1 读取 **`172.16.2.1`** 的 network LSA，这份 network-lsa 告诉 AR1 网络 **`172.16.2.0/24`** 连接了 AR4 和 AR6。这时 AR1 已经能够拼凑出路径 **`AR1-Sham-Link-AR4-172.16.2.0/24-AR6`**。
 
+```java{.line-numbers}
+<AR1>display ospf 2 lsdb network 172.16.2.1
+
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+
+  Type      : Network
+  Ls id     : 172.16.2.1
+  Adv rtr   : 10.4.4.4  
+  Ls age    : 1024 
+  Len       : 32 
+  Options   :  E  
+  seq#      : 80000007 
+  chksum    : 0x14f
+  Net mask  : 255.255.255.0
+  Priority  : Low
+     Attached Router    10.4.4.4
+     Attached Router    6.6.6.6
+```
+
+最后，读取原来已经保存的 AR6 router-lsa，这份 Router-LSA 就是建立 sham-link 之前 AR5 发送给 AR1 的那一份。因此 AR1 计算出通过 sham-link 去往 **`1.1.6.1/32`** 的路径的 cost 为 2，**`AR1-AR4-AR6`** 为最优路径。
+
+```java{.line-numbers}
+<AR1>display ospf 2 lsdb router 6.6.6.6
+
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Router
+  Ls id     : 6.6.6.6
+  Adv rtr   : 6.6.6.6  
+  Ls age    : 850 
+  Len       : 60 
+  Options   :  E  
+  seq#      : 8000000f 
+  chksum    : 0xa4ce
+  Link count: 3
+   * Link ID: 172.16.2.1   
+     Data   : 172.16.2.2   
+     Link Type: TransNet     
+     Metric : 3
+   * Link ID: 10.1.56.6    
+     Data   : 10.1.56.6    
+     Link Type: TransNet     
+     Metric : 100
+   * Link ID: 1.1.6.1      
+     Data   : 255.255.255.255 
+     Link Type: StubNet      
+     Metric : 0 
+     Priority : Medium
+```
+
+**（3）OSPF 路由抑制**
+
+依据 RFC 4577 规范，sham-link 仅作为承载 OSPF 控制平面协议报文的逻辑链路，不直接承担业务数据转发。**<font color="red">当某条目的网段的最优 OSPF 路径下一跳为 sham-link 时，实际数据转发必须交由对应的 BGP VPNv4 路由执行，且该 OSPF 路由不得再次被重分发回 BGP</font>**。
+
+为满足上述协议要求，华为设备采取了直接抑制机制：**<font color="red">凡是 SPF 计算出的最优下一跳为 sham-link 的路由，均不再写入 OSPF 协议路由表（**`display ospf 2 routing`**），也不再下发至 vpna IP 路由表</font>**。因此，**`1.1.6.1/32`**（同样包括 **`172.16.2.0/24`**）均从 AR1 的 ospf 2 路由表中消失。
+
+```java{.line-numbers}
+<AR1>display ospf 2 lsdb 
+	 OSPF Process 2 with Router ID 10.1.1.1
+		 Link State Database 
+		         Area: 0.0.0.0
+ Type      LinkState ID    AdvRouter          Age  Len   Sequence   Metric
+ Router    10.4.4.4        10.4.4.4          1797  48    8000000B       1
+ Network   172.16.2.1      10.4.4.4            43  32    80000008       0
+<AR1>display ospf 2 routing 
+	 OSPF Process 2 with Router ID 10.1.1.1
+		  Routing Tables 
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 172.16.1.0/24      1     Transit    172.16.1.1      10.1.1.1        0.0.0.0
+ 1.1.5.1/32         1     Stub       172.16.1.2      5.5.5.5         0.0.0.0
+ 10.1.56.0/24       101   Transit    172.16.1.2      6.6.6.6         0.0.0.0
+ Total Nets: 3  
+ Intra Area: 3  Inter Area: 0  ASE: 0  NSSA: 0 
+```
+
+**（4）BGP vpna 路由表与 vpna IP 路由表的联动更新**
+
+由于 vpna IP 路由表中不再存在 **`1.1.6.1/32`** 的活跃 OSPF 路由，AR1 的 BGP 进程所配置的 **`import-route ospf 2`** 随即撤销了此前本地引入的路由。
+
+```java{.line-numbers}
+<AR1>display bgp vpnv4 vpn-instance vpna routing-table 1.1.6.1
+
+ BGP local router ID : 1.1.1.1
+ Local AS number : 100
+
+ VPN-Instance vpna, Router ID 1.1.1.1:
+ Paths:   1 available, 1 best, 1 select
+ BGP routing table entry information of 1.1.6.1/32:
+ Label information (Received/Applied): 1029/NULL
+ From: 10.4.4.4 (4.4.4.4)
+ Route Duration: 03h01m52s  
+ Relay Tunnel Out-Interface: GigabitEthernet0/0/0
+ Relay token: 0x5
+ Original nexthop: 10.4.4.4
+ Qos information : 0x0
+ Ext-Community:RT <1 : 1>, OSPF DOMAIN ID <0.0.0.10 : 0>, OSPF RT <0.0.0.0 : 1 : 0>, OSPF ROUTER ID <10.4.4.4 : 0>
+ AS-path Nil, origin incomplete, MED 2, localpref 100, pref-val 0, valid, internal, best, select, active, pre 255, IGP cost 3
+ Not advertised to any peer yet
+
+<AR1>display ip routing-table vpn-instance vpna 1.1.6.1
+Route Flags: R - relay, D - download to fib
+------------------------------------------------------------------------------
+Routing Table : vpna
+Summary Count : 1
+Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
+        1.1.6.1/32  IBGP    255  2          RD   10.4.4.4        GigabitEthernet0/0/0
+```
+
+此时，AR1 的 BGP vpna 路由表中仅保留由远端 PE（AR4）通过 MP-iBGP 传递的 VPNv4 路由（下一跳为 **`10.4.4.4`**）。该路由成为 BGP 最优路径（**`best, select, active`**），并顺利安装进 vpna IP 路由表中。
+
+**（5）触发 `import-route bgp` 生成 Type 3 LSA**
+
+当来自 AR4 的 **`1.1.6.1/32`** 路由成为 vpna IP 路由表中的活跃（Active）IBGP 路由后，AR1 在 ospf 2 下配置的 **`import-route bgp`** 终于在 vpna ip 路由表中匹配到了活跃的 BGP 路由。又因为 AR1 与 AR4 配置了相同的 **`domain-id 0.0.0.10`**，且该路由原始属性为 OSPF 区域内路由，AR1 便在 ospf 2 的 Area 0 中为其生成了一条带有 DN 防环置位的 Type 3 Summary-LSA。
+
+```java{.line-numbers}
+<AR1>display ospf 2 lsdb summary 1.1.6.1
+	 OSPF Process 2 with Router ID 10.1.1.1
+		         Area: 0.0.0.0
+		 Link State Database 
+  Type      : Sum-Net
+  Ls id     : 1.1.6.1
+  Adv rtr   : 10.1.1.1  
+  Ls age    : 353 
+  Len       : 28 
+  Options   :  E  DN  
+  seq#      : 80000007 
+  chksum    : 0x17a7
+  Net mask  : 255.255.255.255
+  Tos 0  metric: 2
+  Priority  : Low
+```
+
+#### 7.10.5 sham-link 实验数据层面
+
+接下来分析，数据报文从 AR1 到 AR6 的转发过程。首先 AR1 收到来自私网的 ICMP 请求报文，首先查询 vpna 的路由表。发现目的地址 **`1.1.6.1/32`** 的下一跳为 AR4。AR1 对该数据报文贴上双层标签，内层私网标签为 1029，用于 AR4 识别目的 VRF。外层公网标签根据 LDP LSP 表项，查找到达 **`10.4.4.4`** 的公网隧道标签为 1025，将其压入栈顶。
+
+```java{.line-numbers}
+<AR1>display mpls lsp        
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name                                           
+10.4.4.4/32        NULL/1025     -/GE0/0/0                                     
+10.4.4.4/32        1026/1025     -/GE0/0/0                                      
+```
+
+AR2 作为骨干网的中间路由器，仅关注外层标签 1025。AR2 查询本地 MPLS 转发表，发现该标签对应的出标签为 1024。AR2 执行 Swap 操作，将 1025 替换为 1024，并转发给 AR3。AR3 作为到达 AR4 的倒数第二跳，执行 PHP 操作。AR3 直接将外层标签 1024 弹出，报文只携带私网标签 1029 被发送给 AR4。
+
+```java{.line-numbers}
+<AR2>display mpls lsp
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name                                        
+10.4.4.4/32        NULL/1024     -/GE0/0/1                                     
+10.4.4.4/32        1025/1024     -/GE0/0/1 
+
+<AR3>display mpls lsp 
+-------------------------------------------------------------------------------
+                 LSP Information: LDP LSP
+-------------------------------------------------------------------------------
+FEC                In/Out Label  In/Out IF                      Vrf Name                                           
+10.4.4.4/32        NULL/3        -/GE0/0/1                                     
+10.4.4.4/32        1024/3        -/GE0/0/1  
+```
+
+AR4 收到仅携带私网标签 1029 的报文。AR4 通过标签查询 MPLS 转发表，识别出该标签属于 vpna 实例。AR4 执行 Pop 操作，移除 VPN 标签 1029，恢复出原始的 IPv4 报文。随后，AR4 查询 vpna 的路由表，进行普通的 IP 转发给 AR6。
