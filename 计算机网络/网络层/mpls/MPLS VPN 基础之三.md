@@ -710,7 +710,7 @@ AR1 和 AR4 面向客户的接口（**`G0/0/1`**）均绑定至私网实例 vpna
 
 此时 AR1 和 AR4 之间没有配置 sham-link，导致 AR1 去往 **`1.1.6.1/32`** 路由的下一跳为 **`172.16.1.2`**，而不是 **`10.4.4.4`**。
 
-sham-link 的 Cost 默认为 1，也通过设置 sham-link 的开销值来保证数据流走的是骨干网链路而非后门链路。sham-link 建立在两台 PE 路由器之间，要求两台 PE 路由器分别在对应的 VRF 中建立一个 32 位掩码的环回接口来充当 sham-link 的端点，并且需要将这个地址宣告进 iBGP，BGP 使用 Route-type 值 129 的扩展团体属性将 sham-link 的端点地址通告给其他 PE。
+sham-link 的 Cost 默认为 1，也通过设置 sham-link 的开销值来保证数据流走的是骨干网链路而非后门链路。sham-link 建立在两台 PE 路由器之间，**<font color="red">要求两台 PE 路由器分别在对应的 VRF 中建立一个 32 位掩码的环回接口来充当 sham-link 的端点，并且需要将这个地址宣告进 iBGP</font>**。LSA 在 sham-link 是不会周期性地泛洪的。
 
 在区域视图下使用 sham-link 命令建立 sham-link，后面加上源和目标端点环回口地址。在 sham-link 建好后，注意，不能把 sham-link 的端点地址宣告进 VRF 下的 OSPF 进程，否则会导致 sham-link 抖动。
 
@@ -931,7 +931,7 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
 
 因此，在比较到 MED 属性之前，选路就已经分出胜负，而 AR4 传来的远端路由因 **`not preferred for route type`**（路由类型不优）在 BGP 内部中直接落选，仅保留 * i 状态。
 
-BGP 选出的最优路径本质上源自原本的 OSPF 路由，并未提供新的转发方向；而真正指向 MPLS 骨干网的远端 BGP 路由在内部选路中已经出局。因此，vpna IP 路由表继续保留唯一的活跃路由 **`1.1.6.1/32`**，也就是由 ospf 2 提供的后门链路路由。ospf 2 下的 **`import-route bgp`** 命令只会从 vpna IP 路由表中抓取处于活跃（Active）状态的 BGP 路由进行重分发。由于当前 vpna IP 路由表中 **`1.1.6.1/32`** 的协议类型是 OSPF，不存在活跃的 BGP 路由，**`import-route bgp`** 无路由可引，自然也就不会向 AR5 泛洪对应的 Type 3 LSA。
+由于 OSPF 的协议优先级高于 BGP，因此，vpna IP 路由表继续保留唯一的活跃路由 **`1.1.6.1/32`**，也就是由 ospf 2 提供的后门链路路由。ospf 2 下的 **`import-route bgp`** 命令只会从 vpna IP 路由表中抓取处于活跃（Active）状态的 BGP 路由进行重分发。由于当前 vpna IP 路由表中 **`1.1.6.1/32`** 的协议类型是 OSPF，不存在活跃的 BGP 路由，**`import-route bgp`** 无路由可引，自然也就不会向 AR5 泛洪对应的 Type 3 LSA。
 
 AR1 访问 **`1.1.6.1/32`** 的业务流量，最终只能沿着开销高达 101 的低速后门链路转发，完全绕开了高速的 MPLS 骨干网。这也正是后续需要引入 Sham-Link（伪连接）来重构 OSPF 逻辑拓扑的根本原因。
 
@@ -1020,36 +1020,47 @@ quit
 针对 AR1 的 **`G0/0/0`** 和 **`G0/0/1`** 进行抓包，可以看到 AR6 通过 **`AR6-AR5-AR1`** 传递过来的 **`Router 6.6.6.6 Type1 LSA`**。但是没有收到 AR6 通过 **`AR6-AR4-sham-link-AR1`** 传递过来的 **`Router 6.6.6.6 Type1 LSA`**。
 
 ```java{.line-numbers}
-Frame 94: 122 bytes on wire (976 bits), 122 bytes captured (976 bits) on interface -, id 0
-Ethernet II, Src: HuaweiTe_d5:70:29 (00:e0:fc:d5:70:29), Dst: IPv4mcast_05 (01:00:5e:00:00:05)
-Internet Protocol Version 4, Src: 172.16.1.2, Dst: 224.0.0.5
+Frame 19: 214 bytes on wire (1712 bits), 214 bytes captured (1712 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_d5:70:29 (00:e0:fc:d5:70:29), Dst: HuaweiTe_87:73:8c (00:e0:fc:87:73:8c)
+Internet Protocol Version 4, Src: 172.16.1.2, Dst: 172.16.1.1
 Open Shortest Path First
     OSPF Header
+        Version: 2
+        Message Type: LS Update (4)
+        Packet Length: 180
+        Source OSPF Router: 5.5.5.5
+        Area ID: 0.0.0.0 (Backbone)
+        Checksum: 0x38ed [correct]
+        Auth Type: Null (0)
+        Auth Data (none): 0000000000000000
     LS Update Packet
-        Number of LSAs: 1
+        Number of LSAs: 3
         LSA-type 1 (Router-LSA), len 60
-            .000 0000 0000 0010 = LS Age (seconds): 2
+        LSA-type 1 (Router-LSA), len 60
+            .000 0000 0000 0011 = LS Age (seconds): 3
             0... .... .... .... = Do Not Age Flag: 0
             Options: 0x02, (E) External Routing
             LS Type: Router-LSA (1)
             Link State ID: 6.6.6.6
             Advertising Router: 6.6.6.6
-            Sequence Number: 0x8000000a
-            Checksum: 0xaec9
+            Sequence Number: 0x80000006
+            Checksum: 0x350a
             Length: 60
             Flags: 0x00
             Number of Links: 3
-            Type: Transit  ID: 172.16.2.1      Data: 172.16.2.2      Metric: 3
+            Type: Stub     ID: 172.16.2.0      Data: 255.255.255.0   Metric: 1
             Type: Transit  ID: 10.1.56.6       Data: 10.1.56.6       Metric: 100
             Type: Stub     ID: 1.1.6.1         Data: 255.255.255.255 Metric: 0
+        LSA-type 2 (Network-LSA), len 32
 ```
 
-以下 Frame 129 是 AR4 发送给 AR1 的 DD 报文，包含 **`6.6.6.6 Router LSA`**，Frame 128 是 AR1 发送给 AR4 的 DD 报文，也包含同样的 **`6.6.6.6 Router LSA`**。OSPF 建立邻接关系初期，双方通过 DB Description (DD) 报文交换数据库摘要，而非直接泛洪完整 LSA（Body）。DD 报文先告诉对端我这里有哪些 LSA、版本，从而让对端能够判断哪些 LSA 是一致的，哪些 LSA 缺失，哪些 LSA 版本较旧。而真正缺失或需要更新的完整 LSA，则由后续的 LSR/LSU 机制来请求和传送。
+以下 Frame 124 是 AR4 发送给 AR1 的 DD 报文，包含 **`6.6.6.6 Router LSA`**，Frame 123 是 AR1 发送给 AR4 的 DD 报文，也包含同样的 **`6.6.6.6 Router LSA`**。OSPF 建立邻接关系初期，双方通过 DB Description (DD) 报文交换数据库摘要，而非直接泛洪完整 LSA（Body）。DD 报文先告诉对端我这里有哪些 LSA、版本，从而让对端能够判断哪些 LSA 是一致的，哪些 LSA 缺失，哪些 LSA 版本较旧。而真正缺失或需要更新的完整 LSA，则由后续的 LSR/LSU 机制来请求和传送。
 
 因此 AR1 通过后门链路（AR5）已经拥有了 **`6.6.6.6 Router-LSA`** 的完整实例，它在收到 AR4 的 DD 摘要时，会发现本地 LSDB 中已存在相同版本。由于本地已有，AR1 不会向 AR4 发送 LSR 请求该 LSA。因为没有请求，AR4 自然不会发送对应的 LSU。
 
 ```java{.line-numbers}
-Frame 129: 250 bytes on wire (2000 bits), 250 bytes captured (2000 bits) on interface -, id 0
+Frame 124: 250 bytes on wire (2000 bits), 250 bytes captured (2000 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_01:4e:d3 (00:e0:fc:01:4e:d3), Dst: HuaweiTe_87:73:8b (00:e0:fc:87:73:8b)
 MultiProtocol Label Switching Header, Label: 1027, Exp: 6, S: 1, TTL: 253
 Internet Protocol Version 4, Src: 192.168.100.4, Dst: 192.168.100.1
 Open Shortest Path First
@@ -1059,13 +1070,13 @@ Open Shortest Path First
         Packet Length: 212
         Source OSPF Router: 10.4.4.4
         Area ID: 0.0.0.0 (Backbone)
-        Checksum: 0x611d [correct]
+        Checksum: 0x638b [correct]
         Auth Type: Null (0)
         Auth Data (none): 0000000000000000
     OSPF DB Description
     // 省略其余 lsa 摘要
     LSA-type 1 (Router-LSA), len 60
-        .000 0000 0011 0011 = LS Age (seconds): 51
+        .000 0000 0001 1000 = LS Age (seconds): 24
         0... .... .... .... = Do Not Age Flag: 0
         Options: 0x02, (E) External Routing
         LS Type: Router-LSA (1)
@@ -1074,7 +1085,9 @@ Open Shortest Path First
         Sequence Number: 0x80000009
         Checksum: 0x8cee
         Length: 60
-Frame 128: 254 bytes on wire (2032 bits), 254 bytes captured (2032 bits) on interface -, id 0
+
+Frame 123: 254 bytes on wire (2032 bits), 254 bytes captured (2032 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_87:73:8b (00:e0:fc:87:73:8b), Dst: HuaweiTe_01:4e:d3 (00:e0:fc:01:4e:d3)
 MultiProtocol Label Switching Header, Label: 1025, Exp: 6, S: 0, TTL: 255
 MultiProtocol Label Switching Header, Label: 1027, Exp: 6, S: 1, TTL: 255
 Internet Protocol Version 4, Src: 192.168.100.1, Dst: 192.168.100.4
@@ -1085,13 +1098,13 @@ Open Shortest Path First
         Packet Length: 212
         Source OSPF Router: 10.1.1.1
         Area ID: 0.0.0.0 (Backbone)
-        Checksum: 0x641b [correct]
+        Checksum: 0x6692 [correct]
         Auth Type: Null (0)
         Auth Data (none): 0000000000000000
     OSPF DB Description
     // 省略其余 lsa 摘要
     LSA-type 1 (Router-LSA), len 60
-        .000 0000 0011 0101 = LS Age (seconds): 53
+        .000 0000 0001 1001 = LS Age (seconds): 25
         0... .... .... .... = Do Not Age Flag: 0
         Options: 0x02, (E) External Routing
         LS Type: Router-LSA (1)
@@ -1127,11 +1140,11 @@ sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link �
   Type      : Router
   Ls id     : 10.1.1.1
   Adv rtr   : 10.1.1.1  
-  Ls age    : 800 
+  Ls age    : 542 
   Len       : 48 
   Options   :  ASBR  ABR  E  
-  seq#      : 8000000b 
-  chksum    : 0xf097
+  seq#      : 80000006 
+  chksum    : 0xfa92
   Link count: 2
    * Link ID: 172.16.1.1   
      Data   : 172.16.1.1   
@@ -1153,11 +1166,11 @@ sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link �
   Type      : Router
   Ls id     : 10.4.4.4
   Adv rtr   : 10.4.4.4  
-  Ls age    : 914 
+  Ls age    : 597 
   Len       : 48 
   Options   :  ASBR  ABR  E  
-  seq#      : 8000000b 
-  chksum    : 0xa6d6
+  seq#      : 80000006 
+  chksum    : 0xb0d1
   Link count: 2
    * Link ID: 172.16.2.1   
      Data   : 172.16.2.1   
@@ -1192,11 +1205,10 @@ sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link �
      Attached Router    6.6.6.6
 ```
 
-最后，读取原来已经保存的 AR6 router-lsa，这份 Router-LSA 就是建立 sham-link 之前 AR5 发送给 AR1 的那一份。因此 AR1 计算出通过 sham-link 去往 **`1.1.6.1/32`** 的路径的 cost 为 2，**`AR1-AR4-AR6`** 为最优路径。
+最后，读取就是配置 sham-link 之后由 AR5 发送给 AR1 的 Router LSA。因此 AR1 计算出通过 sham-link 去往 **`1.1.6.1/32`** 的路径的 cost 为 2，**`AR1-AR4-AR6`** 为最优路径。从 AR1 的 **`G0/0/1`** 抓包结果可知，该 router LSA 是由 AR5 发送给 AR1 的。 
 
 ```java{.line-numbers}
 <AR1>display ospf 2 lsdb router 6.6.6.6
-
 	 OSPF Process 2 with Router ID 10.1.1.1
 		         Area: 0.0.0.0
 		 Link State Database 
@@ -1206,13 +1218,13 @@ sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link �
   Ls age    : 850 
   Len       : 60 
   Options   :  E  
-  seq#      : 8000000f 
-  chksum    : 0xa4ce
+  seq#      : 80000009 
+  chksum    : 0x8cee
   Link count: 3
    * Link ID: 172.16.2.1   
      Data   : 172.16.2.2   
      Link Type: TransNet     
-     Metric : 3
+     Metric : 1
    * Link ID: 10.1.56.6    
      Data   : 10.1.56.6    
      Link Type: TransNet     
@@ -1222,22 +1234,39 @@ sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link �
      Link Type: StubNet      
      Metric : 0 
      Priority : Medium
+
+Frame 37: 158 bytes on wire (1264 bits), 158 bytes captured (1264 bits) on interface -, id 0
+Ethernet II, Src: HuaweiTe_d5:70:29 (00:e0:fc:d5:70:29), Dst: IPv4mcast_05 (01:00:5e:00:00:05)
+Internet Protocol Version 4, Src: 172.16.1.2, Dst: 224.0.0.5
+Open Shortest Path First
+    OSPF Header
+    LS Update Packet
+        Number of LSAs: 2
+        LSA-type 1 (Router-LSA), len 36
+        LSA-type 1 (Router-LSA), len 60
+            .000 0000 0000 0010 = LS Age (seconds): 2
+            0... .... .... .... = Do Not Age Flag: 0
+            Options: 0x02, (E) External Routing
+            LS Type: Router-LSA (1)
+            Link State ID: 6.6.6.6
+            Advertising Router: 6.6.6.6
+            Sequence Number: 0x80000009
+            Checksum: 0x8cee
+            Length: 60
+            Flags: 0x00
+            Number of Links: 3
+            Type: Transit  ID: 172.16.2.1      Data: 172.16.2.2      Metric: 1
+            Type: Transit  ID: 10.1.56.6       Data: 10.1.56.6       Metric: 100
+            Type: Stub     ID: 1.1.6.1         Data: 255.255.255.255 Metric: 0
 ```
 
 **（3）OSPF 路由抑制**
 
 依据 RFC 4577 规范，sham-link 仅作为承载 OSPF 控制平面协议报文的逻辑链路，不直接承担业务数据转发。**<font color="red">当某条目的网段的最优 OSPF 路径下一跳为 sham-link 时，实际数据转发必须交由对应的 BGP VPNv4 路由执行，且该 OSPF 路由不得再次被重分发回 BGP</font>**。
 
-为满足上述协议要求，华为设备采取了直接抑制机制：**<font color="red">凡是 SPF 计算出的最优下一跳为 sham-link 的路由，均不再写入 OSPF 协议路由表（**`display ospf 2 routing`**），也不再下发至 vpna IP 路由表</font>**。因此，**`1.1.6.1/32`**（同样包括 **`172.16.2.0/24`**）均从 AR1 的 ospf 2 路由表中消失。
+为满足上述协议要求，华为设备采取了直接抑制机制：**<font color="red">凡是 SPF 计算出的最优下一跳为 sham-link 的路由，均不再写入 OSPF 协议路由表（**`display ospf 2 routing`**），也不再下发至 vpna IP 路由表</font>**。因此，**`1.1.6.1/32`** 从 AR1 的 ospf 2 路由表中消失。
 
 ```java{.line-numbers}
-<AR1>display ospf 2 lsdb 
-	 OSPF Process 2 with Router ID 10.1.1.1
-		 Link State Database 
-		         Area: 0.0.0.0
- Type      LinkState ID    AdvRouter          Age  Len   Sequence   Metric
- Router    10.4.4.4        10.4.4.4          1797  48    8000000B       1
- Network   172.16.2.1      10.4.4.4            43  32    80000008       0
 <AR1>display ospf 2 routing 
 	 OSPF Process 2 with Router ID 10.1.1.1
 		  Routing Tables 
@@ -1248,6 +1277,22 @@ sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link �
  10.1.56.0/24       101   Transit    172.16.1.2      6.6.6.6         0.0.0.0
  Total Nets: 3  
  Intra Area: 3  Inter Area: 0  ASE: 0  NSSA: 0 
+```
+
+以 AR6 的 Router-LSA 中描述的传输网络 **`10.1.56.0/24`** 为例，进一步验证 OSPF 路由抑制机制。
+
+初始状态下，AR1 经 Sham-Link 到达该网段的 Cost 为 102（**`1 + 1 + 100`**），经 AR5 到达该网段的 Cost 为 101（**`1 + 100`**）。因此，SPF 优选经 AR5 的区域内路径，下一跳为 **`172.16.1.2`**，而非 Sham-Link，该路由正常保留在 OSPF 2 路由表中。将 AR1 的 **`GE0/0/1`** 和 AR5 的 **`GE0/0/0`** 接口的 OSPF Cost 均修改为 10 后，经 AR5 的路径开销增至 110（**`10 + 100`**），而经 Sham-Link 的路径开销仍为 102。此时，SPF 优选经 Sham-Link 到达该网段的路径，触发 OSPF 路由抑制机制，导致 **`10.1.56.0/24`** 从 OSPF 2 路由表中消失，实验回显如下。
+
+```java{.line-numbers}
+[AR1-GigabitEthernet0/0/1]display ospf 2 routing 
+	 OSPF Process 2 with Router ID 10.1.1.1
+		  Routing Tables 
+ Routing for Network 
+ Destination        Cost  Type       NextHop         AdvRouter       Area
+ 172.16.1.0/24      10    Transit    172.16.1.1      10.1.1.1        0.0.0.0
+ 1.1.5.1/32         10    Stub       172.16.1.2      5.5.5.5         0.0.0.0
+ Total Nets: 2  
+ Intra Area: 2  Inter Area: 0  ASE: 0  NSSA: 0 
 ```
 
 **（4）BGP vpna 路由表与 vpna IP 路由表的联动更新**
@@ -1265,7 +1310,7 @@ sham-link 建立后，AR1 首先查看自己的 Router-LSA。从第 2 个 Link �
  BGP routing table entry information of 1.1.6.1/32:
  Label information (Received/Applied): 1029/NULL
  From: 10.4.4.4 (4.4.4.4)
- Route Duration: 03h01m52s  
+ Route Duration: 00h17m26s  
  Relay Tunnel Out-Interface: GigabitEthernet0/0/0
  Relay token: 0x5
  Original nexthop: 10.4.4.4
@@ -1297,11 +1342,11 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
   Type      : Sum-Net
   Ls id     : 1.1.6.1
   Adv rtr   : 10.1.1.1  
-  Ls age    : 353 
+  Ls age    : 1077 
   Len       : 28 
   Options   :  E  DN  
-  seq#      : 80000007 
-  chksum    : 0x17a7
+  seq#      : 80000001 
+  chksum    : 0x23a1
   Net mask  : 255.255.255.255
   Tos 0  metric: 2
   Priority  : Low
@@ -1309,7 +1354,7 @@ Destination/Mask    Proto   Pre  Cost      Flags NextHop         Interface
 
 #### 7.10.5 sham-link 实验数据层面
 
-接下来分析，数据报文从 AR1 到 AR6 的转发过程。首先 AR1 收到来自私网的 ICMP 请求报文，首先查询 vpna 的路由表。发现目的地址 **`1.1.6.1/32`** 的下一跳为 AR4。AR1 对该数据报文贴上双层标签，内层私网标签为 1029，用于 AR4 识别目的 VRF。外层公网标签根据 LDP LSP 表项，查找到达 **`10.4.4.4`** 的公网隧道标签为 1025，将其压入栈顶。
+接下来分析，数据报文从 AR1 到 AR6 的转发过程。首先 AR1 收到来自私网的 ICMP 请求报文，首先查询 vpna 的路由表。发现目的地址 **`1.1.6.1/32`** 的下一跳为 AR4。AR1 对该数据报文贴上双层标签，内层私网标签为 1029。外层公网标签根据 LDP LSP 表项，查找到达 **`10.4.4.4`** 的公网隧道标签为 1025，将其压入栈顶。
 
 ```java{.line-numbers}
 <AR1>display mpls lsp        
@@ -1341,4 +1386,4 @@ FEC                In/Out Label  In/Out IF                      Vrf Name
 10.4.4.4/32        1024/3        -/GE0/0/1  
 ```
 
-AR4 收到仅携带私网标签 1029 的报文。AR4 通过标签查询 MPLS 转发表，识别出该标签属于 vpna 实例。AR4 执行 Pop 操作，移除 VPN 标签 1029，恢复出原始的 IPv4 报文。随后，AR4 查询 vpna 的路由表，进行普通的 IP 转发给 AR6。
+AR4 收到 AR3 转发过来的仅携带私网标签 1029 的 MPLS 报文。由于本实验采用 Per-route（每路由每标签）的 VPN 标签分配方式，私网标签 1029 对应的是 vpna 实例中的 **`1.1.6.1/32`** 路由。AR4 根据入标签 1029 查询本地 MPLS 标签转发表，获得对应的标签操作、出接口 **`G0/0/1`** 以及下一跳 **`172.16.2.2`**（AR6）。随后，AR4 执行 Pop 操作，移除私网标签 1029，然后直接将报文转发给 AR6，无需再次查询 vpna 的 IP 转发表。
